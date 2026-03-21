@@ -199,7 +199,7 @@ def generate_yaml(
             "    ble_client_id: inlite_ble_id",
             "    esp32_ble_id: inlite_ble_tracker_id",
             f"    hub_id: {hub_id_hex}",
-            f"    network_passphrase_hex: {passphrase_hex}",
+            f"    network_passphrase_hex: {yaml_q(passphrase_hex)}",
             "    auto_discover: true",
             "    discover_name_filter: inlite",
             "    command_timeout: 600ms",
@@ -349,7 +349,11 @@ def main() -> int:
     elif len(parsed_gardens) == 1:
         selected_index = 1
     else:
-        selected_index = int(prompt("Select garden number", "1"))
+        selected_raw = prompt("Select garden number", "1")
+        try:
+            selected_index = int(selected_raw)
+        except ValueError:
+            fail(f"invalid garden selection '{selected_raw}', expected a number")
 
     if selected_index < 1 or selected_index > len(parsed_gardens):
         fail(f"garden index out of range: {selected_index}")
