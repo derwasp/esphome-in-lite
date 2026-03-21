@@ -60,7 +60,6 @@ DEFAULT_TTL = 5
 CMD_TYPE_OOB = 0x03
 
 OPCODE_SET_OUTLET_MODE = 4103
-OPCODE_SET_OUTLET_BRIGHTNESS = 4104
 OPCODE_GET_INFO_DEVICES = 5
 OPCODE_OOB_OUTLET_MODE_UPDATE = 24
 OPCODE_OOB_ALL_OUTLETS_MODE_UPDATE = 33
@@ -464,14 +463,6 @@ def cmd_set_outlet_mode(line_id: int, on: bool) -> bytes:
     return mesh_command(OPCODE_SET_OUTLET_MODE, bytes([line_id & 0xFF, mode_byte, mode_mask]))
 
 
-def cmd_set_outlet_brightness(line_id: int, brightness: int) -> bytes:
-    # Payload format is inferred from static APK analysis and needs live verification.
-    return mesh_command(
-        OPCODE_SET_OUTLET_BRIGHTNESS,
-        bytes([line_id & 0xFF, max(0, min(255, brightness))]),
-    )
-
-
 def cmd_get_info_devices() -> bytes:
     return mesh_command(OPCODE_GET_INFO_DEVICES, b"")
 
@@ -807,15 +798,9 @@ def parse_args() -> argparse.Namespace:
     )
     scan.add_argument("--all", action="store_true", help="Show all devices from scan")
 
-    line = sub.add_parser("line", help="Set line on/off (+ optional brightness)")
+    line = sub.add_parser("line", help="Set line on/off")
     line.add_argument("line", type=int, help="Line number (0..15)")
     line.add_argument("state", choices=["on", "off"])
-    line.add_argument(
-        "--brightness",
-        type=int,
-        default=None,
-        help="Brightness 0..255 (inferred opcode 4104 payload)",
-    )
     line.add_argument(
         "--auto-discover",
         action="store_true",
@@ -980,8 +965,6 @@ async def run_line(args: argparse.Namespace) -> int:
     print(f"write_with_response={args.write_with_response}")
 
     payloads: list[bytes] = [cmd_set_outlet_mode(args.line, args.state == "on")]
-    if args.state == "on" and args.brightness is not None:
-        payloads.append(cmd_set_outlet_brightness(args.line, args.brightness))
 
     try:
         async with InliteBleHarness(

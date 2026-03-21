@@ -96,7 +96,7 @@ python3 tools/inlite_ble_harness.py \
   --timeout-ms 1200 \
   --retries 4 \
   --verbose \
-  line 0 on --brightness 180 --auto-discover --discover-seconds 12
+  line 0 on --auto-discover --discover-seconds 12
 
 python3 tools/inlite_ble_harness.py \
   --hub-id 0x163E \

@@ -250,10 +250,10 @@ def verify_connectivity(
 
     line_list = ", ".join(str(x) for x in lines)
 
-    print(f"Step 2/3: Turn lines {line_list} ON at 100% brightness.")
+    print(f"Step 2/3: Turn lines {line_list} ON.")
     for line in lines:
         print(f"  - Sending ON command to line {line}")
-        on_cmd = common + ["line", str(line), "on", "--brightness", "255"]
+        on_cmd = common + ["line", str(line), "on"]
         rc, _, _ = run_logged_command(
             on_cmd,
             log_path=verify_dir / f"02_line_{line}_on.log",

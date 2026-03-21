@@ -2,7 +2,6 @@
 
 #include <algorithm>
 #include <cctype>
-#include <cmath>
 #include <cstring>
 #include <string>
 
@@ -89,7 +88,7 @@ void InliteHub::register_line_light(InliteLineLight *line_light) {
   this->line_lights_.push_back(line_light);
 }
 
-void InliteHub::queue_line_command(uint8_t line_id, bool on, uint8_t brightness) {
+void InliteHub::queue_line_command(uint8_t line_id, bool on) {
   std::vector<uint8_t> mode_cmd = {
       kCmdTypeRequest,
       static_cast<uint8_t>(kOpcodeSetOutletMode & 0xFF),
@@ -99,18 +98,6 @@ void InliteHub::queue_line_command(uint8_t line_id, bool on, uint8_t brightness)
       0x01,
   };
   this->queue_.push_back({mode_cmd});
-
-  // Brightness framing is inferred from static APK analysis and must be validated on hardware.
-  if (on) {
-    std::vector<uint8_t> brightness_cmd = {
-        kCmdTypeRequest,
-        static_cast<uint8_t>(kOpcodeSetOutletBrightness & 0xFF),
-        static_cast<uint8_t>((kOpcodeSetOutletBrightness >> 8) & 0xFF),
-        line_id,
-        brightness,
-    };
-    this->queue_.push_back({brightness_cmd});
-  }
 }
 
 void InliteHub::on_scan_end() {
@@ -908,29 +895,15 @@ void InliteHub::publish_last_command_status_(int status_code) {
 
 light::LightTraits InliteLineLight::get_traits() {
   light::LightTraits traits;
-  traits.set_supported_color_modes({light::ColorMode::BRIGHTNESS});
+  traits.set_supported_color_modes({light::ColorMode::ON_OFF});
   return traits;
 }
 
 void InliteLineLight::write_state(light::LightState *state) {
   this->state_ = state;
-
   bool on = state->current_values.is_on();
-  float brightness = std::clamp(state->current_values.get_brightness(), 0.0f, 1.0f);
-  uint8_t raw_brightness = static_cast<uint8_t>(std::round(brightness * 255.0f));
-
-  if (on && raw_brightness > 0) {
-    this->last_brightness_ = raw_brightness;
-  }
-
-  if (!on) {
-    raw_brightness = 0;
-  } else if (raw_brightness == 0) {
-    raw_brightness = this->last_brightness_ > 0 ? this->last_brightness_ : 255;
-  }
-
   if (this->parent_ != nullptr) {
-    this->parent_->queue_line_command(this->line_, on, raw_brightness);
+    this->parent_->queue_line_command(this->line_, on);
   }
 }
 
@@ -941,19 +914,13 @@ void InliteLineLight::apply_remote_mode(uint8_t output_mode, uint8_t output_stat
   this->last_output_rtc_timer_ = output_rtc_timer;
 
   bool on = output_mode_is_on(output_mode);
-  if (on && this->last_brightness_ == 0) {
-    this->last_brightness_ = 255;
-  }
-
   if (this->state_ == nullptr) {
     return;
   }
 
-  float brightness = on ? static_cast<float>(this->last_brightness_) / 255.0f : 0.0f;
   light::LightColorValues values = this->state_->remote_values;
-  values.set_color_mode(light::ColorMode::BRIGHTNESS);
+  values.set_color_mode(light::ColorMode::ON_OFF);
   values.set_state(on);
-  values.set_brightness(brightness);
   this->state_->remote_values = values;
   this->state_->current_values = values;
   this->state_->publish_state();
