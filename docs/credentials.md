@@ -20,6 +20,8 @@ What it does:
 - shows all returned gardens and lets you select one if multiple are returned
 - prints selected `hub_id` + `passphrase_hex`
 - generates a full ESPHome YAML file
+- asks whether to verify connectivity immediately
+  - if `yes`: runs discovery, turns lines `1,2,3` ON, then turns `1,2,3` OFF using the harness
 - writes raw diagnostics files under the current directory for each run:
   - `./.inlite_wizard/run_<timestamp>_<pid>/`
   - `authorize_request.json`
@@ -28,6 +30,9 @@ What it does:
   - `login_request.json`
   - `login_response.raw.txt`
   - `login_response.parsed.json`
+  - `verify/01_scan.log`
+  - `verify/02_line_<n>_on.log`
+  - `verify/03_line_<n>_off.log`
 
 ---
 

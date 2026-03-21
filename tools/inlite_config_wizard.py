@@ -17,6 +17,7 @@ import json
 import os
 import re
 import secrets
+import shlex
 import subprocess
 import sys
 from dataclasses import dataclass
@@ -54,6 +55,18 @@ def prompt(label: str, default: str | None = None) -> str:
     if value:
         return value
     return default or ""
+
+
+def prompt_yes_no(label: str, default: bool = False) -> bool:
+    suffix = "Y/n" if default else "y/N"
+    value = input(f"{label} [{suffix}]: ").strip().lower()
+    if not value:
+        return default
+    if value in {"y", "yes"}:
+        return True
+    if value in {"n", "no"}:
+        return False
+    fail(f"invalid answer '{value}', expected yes or no")
 
 
 @dataclass
@@ -133,6 +146,120 @@ def run_curl_json(
         raw_response_path=raw_path,
         parsed_response_path=parsed_path,
     )
+
+
+def run_logged_command(
+    cmd: list[str],
+    *,
+    log_path: Path | None = None,
+) -> tuple[int, str, str]:
+    quoted = " ".join(shlex.quote(x) for x in cmd)
+    print(f"$ {quoted}")
+    proc = subprocess.run(cmd, capture_output=True, text=True)
+    stdout = proc.stdout or ""
+    stderr = proc.stderr or ""
+    if stdout:
+        print(stdout, end="")
+    if stderr:
+        print(stderr, file=sys.stderr, end="")
+    if log_path is not None:
+        log_text = (
+            f"$ {quoted}\n"
+            f"exit_code={proc.returncode}\n\n"
+            f"--- stdout ---\n{stdout}\n"
+            f"--- stderr ---\n{stderr}\n"
+        )
+        log_path.write_text(log_text)
+    return proc.returncode, stdout, stderr
+
+
+def verify_connectivity(
+    *,
+    diag_dir: Path,
+    hub_id_hex: str,
+    passphrase_hex: str,
+) -> None:
+    harness_path = Path(__file__).resolve().parent / "inlite_ble_harness.py"
+    if not harness_path.exists():
+        fail(f"harness script not found: {harness_path}")
+
+    python_bin = sys.executable or "python3"
+    verify_dir = diag_dir / "verify"
+    verify_dir.mkdir(parents=True, exist_ok=True)
+
+    print("\nConnectivity verification started.")
+    print("Step 1/3: Discover in-lite BLE target.")
+    scan_cmd = [
+        python_bin,
+        str(harness_path),
+        "scan",
+        "--seconds",
+        "12",
+        "--name-filter",
+        "inlite",
+    ]
+    scan_rc, scan_out, _ = run_logged_command(
+        scan_cmd,
+        log_path=verify_dir / "01_scan.log",
+    )
+    if scan_rc != 0:
+        fail(f"discovery failed. See {verify_dir / '01_scan.log'}")
+
+    match = re.search(r"^best_address=(.+)$", scan_out, flags=re.MULTILINE)
+    if match is None:
+        fail(
+            "discovery did not return best_address. "
+            f"See {verify_dir / '01_scan.log'}"
+        )
+    mac = match.group(1).strip()
+    print(f"Discovered target address: {mac}")
+
+    common = [
+        python_bin,
+        str(harness_path),
+        "--mac",
+        mac,
+        "--hub-id",
+        hub_id_hex,
+        "--passphrase-hex",
+        passphrase_hex,
+        "--timeout-ms",
+        "1200",
+        "--retries",
+        "4",
+        "--verbose",
+    ]
+
+    print("Step 2/3: Turn lines 1, 2, 3 ON at 100% brightness.")
+    for line in (1, 2, 3):
+        print(f"  - Sending ON command to line {line}")
+        on_cmd = common + ["line", str(line), "on", "--brightness", "255"]
+        rc, _, _ = run_logged_command(
+            on_cmd,
+            log_path=verify_dir / f"02_line_{line}_on.log",
+        )
+        if rc != 0:
+            fail(
+                f"line {line} ON command failed. "
+                f"See {verify_dir / f'02_line_{line}_on.log'}"
+            )
+
+    print("Step 3/3: Turn lines 1, 2, 3 OFF.")
+    for line in (1, 2, 3):
+        print(f"  - Sending OFF command to line {line}")
+        off_cmd = common + ["line", str(line), "off"]
+        rc, _, _ = run_logged_command(
+            off_cmd,
+            log_path=verify_dir / f"03_line_{line}_off.log",
+        )
+        if rc != 0:
+            fail(
+                f"line {line} OFF command failed. "
+                f"See {verify_dir / f'03_line_{line}_off.log'}"
+            )
+
+    print("Connectivity verification finished successfully.")
+    print(f"Verification logs: {verify_dir}")
 
 
 def parse_mesh_id(value: Any) -> int | None:
@@ -560,6 +687,20 @@ def main() -> int:
     print(f"  hub_id={selected['hub_id_hex']}")
     print(f"  passphrase_hex={selected['passphrase_hex']}")
     print(f"  lines={','.join(str(x) for x in lines)}")
+
+    print("\nVerification option:")
+    do_verify = prompt_yes_no(
+        "Verify connectivity now (discover hub, turn lines 1-3 ON, then OFF)?",
+        default=False,
+    )
+    if do_verify:
+        verify_connectivity(
+            diag_dir=diag_dir,
+            hub_id_hex=selected["hub_id_hex"],
+            passphrase_hex=selected["passphrase_hex"],
+        )
+    else:
+        print("Connectivity verification skipped.")
 
     print("\nNext:")
     print(f"  esphome config {output_path}")

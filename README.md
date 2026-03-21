@@ -37,6 +37,11 @@ Or run the interactive wizard:
 python3 tools/inlite_config_wizard.py
 ```
 
+At the end, the wizard can optionally verify connectivity by:
+- discovering the hub
+- turning lines `1,2,3` ON
+- turning lines `1,2,3` OFF
+
 2. Add external component to your ESPHome node:
 
 ```yaml
