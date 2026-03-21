@@ -2,34 +2,20 @@
 
 ESPHome external component for local BLE control of in-lite Smart Hub-150.
 
-> Work in progress (WIP): this integration is not tested yet and is still under active reverse-engineering.
+> Work in progress (WIP): this integration is not tested yet.
 
-Current scope (v1):
-- Line control (on/off)
-- Line state sync from hub OOB updates (opcodes 24/33)
-- BLE diagnostics (RSSI, connection state, last command status)
-- Runtime BLE autodiscovery on ESP32
+**Getting started:** make sure you already have an in-lite account configured in the mobile app (and your garden is visible there), then run `python3 tools/inlite_config_wizard.py` to log in, select a garden, and generate a ready-to-use ESPHome YAML with `hub_id` and `network_passphrase_hex`.
 
-## Repository Layout
+## What This Component Does
 
-- `components/inlite_hub/` -> external component
-- `examples/inlite_smart_hub_150_bridge.yaml` -> full bridge example
-- `tools/inlite_ble_harness.py` -> Python validator/debug harness
-- `tools/inlite_config_wizard.py` -> interactive login + garden selection + YAML generator
-- `docs/credentials.md` -> how to get required credentials (iPhone/macOS compatible)
-- `docs/protocol-spec.md` -> protocol notes from reverse engineering
+- Controls Smart Hub lines (`on/off`)
+- Syncs line state from hub OOB updates (opcodes `24` and `33`)
+- Exposes BLE diagnostics (RSSI, connection state, last command status)
+- Supports runtime BLE autodiscovery on ESP32
 
-## Required Inputs
+## Quick Setup
 
-You need only:
-- `hub_id` (mesh destination ID, for example `0x163E`)
-- `network_passphrase_hex` (garden passphrase as UTF-8 bytes in hex)
-
-Hub BLE MAC is optional when autodiscovery is enabled.
-
-## Quick Start
-
-0. Use a virtual environment (recommended):
+1. Create a virtual environment and install dependencies:
 
 ```bash
 python3 -m venv .venv
@@ -37,21 +23,34 @@ source .venv/bin/activate
 pip install -r requirements-dev.txt
 ```
 
-1. Get `hub_id` and `network_passphrase_hex`:
-- Follow `docs/credentials.md`.
-
-Or run the interactive wizard:
+2. Run the config wizard:
 
 ```bash
 python3 tools/inlite_config_wizard.py
 ```
 
-At the end, the wizard can optionally verify connectivity by:
-- discovering the hub
-- turning lines `0,1,2` ON
-- turning lines `0,1,2` OFF
+3. Compile your ESPHome config:
 
-2. Add external component to your ESPHome node:
+```bash
+esphome config your_node.yaml
+esphome compile your_node.yaml
+```
+
+## Required Inputs
+
+- `hub_id` (mesh destination ID, for example `0x163E`)
+- `network_passphrase_hex` (garden passphrase bytes as hex)
+
+When autodiscovery is enabled, you do not need to provide the hub BLE address.
+
+## Manual ESPHome Wiring
+
+If you do not use the wizard, start from `examples/inlite_smart_hub_150_bridge.yaml` and set:
+
+- `inlite_smart_hub_mesh_id`
+- `inlite_smart_hub_passphrase_hex`
+
+External component source:
 
 ```yaml
 external_components:
@@ -62,83 +61,47 @@ external_components:
     components: [inlite_hub]
 ```
 
-3. Use the bridge example:
-- Start from `examples/inlite_smart_hub_150_bridge.yaml`.
-- Set secrets:
-  - `inlite_smart_hub_mesh_id`
-  - `inlite_smart_hub_passphrase_hex`
+## Python Harness (Separate Test Bed)
 
-4. Compile/flash:
+`tools/inlite_ble_harness.py` is a local BLE protocol test bed. It runs on your computer and talks directly to the hub. It is useful for protocol debugging and connectivity checks, but it is not the ESP32 firmware and does not validate flash/runtime behavior on the ESP node.
 
-```bash
-esphome config your_node.yaml
-esphome compile your_node.yaml
-```
+Typical usage:
 
-## Devcontainer
-
-This repo includes a devcontainer with required build/runtime tooling:
-- ESPHome CLI
-- Python harness dependencies (`bleak`, `pycryptodomex`)
-- system tools used by scripts/docs (`curl`, `jq`)
-
-Use it:
-1. Open the repo in VS Code.
-2. Run `Dev Containers: Reopen in Container`.
-3. Wait for post-create install to finish (`pip3 install -r requirements-dev.txt`).
-
-## Testing
-
-1. Validate ESPHome config/build:
-
-```bash
-esphome config your_node.yaml
-esphome compile your_node.yaml
-```
-
-2. Install Python harness deps:
-
-```bash
-# if not already installed via requirements-dev.txt
-pip install -r requirements-harness.txt
-```
-
-3. Run harness selftest:
+1. Self-check harness crypto/framing:
 
 ```bash
 python3 tools/inlite_ble_harness.py selftest
 ```
 
-4. Run end-to-end BLE test (autodiscovery + send):
+2. Discover hub address candidates:
+
+```bash
+python3 tools/inlite_ble_harness.py scan --seconds 12 --name-filter inlite
+```
+
+3. Send a line command directly to the hub:
 
 ```bash
 python3 tools/inlite_ble_harness.py \
   --hub-id 0x163E \
   --passphrase-hex YOUR_HEX \
-  --timeout-ms 1200 \
-  --retries 4 \
-  --verbose \
   line 0 on --auto-discover --discover-seconds 12
 ```
 
-5. Query current line states from hub updates:
+4. Query line states from hub updates.
+   States are event-driven OOB updates, not a guaranteed on-demand read. `--trigger-get-info` can help, but the hub may still return nothing until a line changes. In practice, if you get an empty result, toggle a line in the official app (for example ON then OFF) or send a `line` command first, then run `query` again:
 
 ```bash
 python3 tools/inlite_ble_harness.py \
   --hub-id 0x163E \
   --passphrase-hex YOUR_HEX \
-  --timeout-ms 1200 \
-  --retries 4 \
-  --verbose \
-  query --auto-discover --discover-seconds 12 --listen-seconds 6 --trigger-get-info
+  query --auto-discover --trigger-get-info --listen-seconds 8 --json
 ```
 
-5. Test/setup wizard flow:
+## Repository Layout
 
-```bash
-python3 tools/inlite_config_wizard.py --help
-```
-
-## Notes
-
-- Do not commit real credentials/secrets to git.
+- `components/inlite_hub/`: ESPHome external component
+- `examples/inlite_smart_hub_150_bridge.yaml`: example node configuration
+- `tools/inlite_config_wizard.py`: login + garden selection + YAML generation
+- `tools/inlite_ble_harness.py`: local BLE test bed
+- `docs/credentials.md`: credential retrieval flow
