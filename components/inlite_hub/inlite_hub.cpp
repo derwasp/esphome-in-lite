@@ -566,7 +566,6 @@ void InliteHub::handle_block_data_(const std::vector<uint8_t> &payload) {
       return;
     }
     uint8_t output_rtc_timer = payload.size() >= 7 ? payload[6] : 0;
-    this->has_received_state_snapshot_ = true;
     this->apply_line_mode_update_(payload[3], payload[4], payload[5], output_rtc_timer);
     return;
   }
