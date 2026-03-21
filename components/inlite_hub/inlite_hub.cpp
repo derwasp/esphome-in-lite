@@ -113,6 +113,46 @@ void InliteHub::queue_line_command(uint8_t line_id, bool on, uint8_t brightness)
   }
 }
 
+void InliteHub::queue_state_sync_request_(bool force) {
+  if (this->node_state != espbt::ClientState::ESTABLISHED || !this->characteristics_ready_) {
+    return;
+  }
+  if (!force && this->has_received_state_snapshot_) {
+    return;
+  }
+
+  std::vector<uint8_t> get_info_cmd = {
+      kCmdTypeRequest,
+      static_cast<uint8_t>(kOpcodeGetInfoDevices & 0xFF),
+      static_cast<uint8_t>((kOpcodeGetInfoDevices >> 8) & 0xFF),
+  };
+  auto payload_is_get_info = [&](const std::vector<uint8_t> &payload) {
+    return payload.size() == get_info_cmd.size() &&
+           std::equal(payload.begin(), payload.end(), get_info_cmd.begin());
+  };
+
+  if (this->active_stream_.active && payload_is_get_info(this->active_stream_.payload)) {
+    return;
+  }
+  for (const auto &queued : this->queue_) {
+    if (payload_is_get_info(queued.payload)) {
+      return;
+    }
+  }
+
+  uint32_t now = millis();
+  if (!force) {
+    uint32_t min_gap_ms = std::max<uint32_t>(this->get_update_interval(), 1000);
+    if (now - this->last_state_sync_request_ms_ < min_gap_ms) {
+      return;
+    }
+  }
+
+  this->queue_.push_back({get_info_cmd});
+  this->last_state_sync_request_ms_ = now;
+  ESP_LOGD(TAG, "Queued state sync request (GET_INFO_DEVICES)");
+}
+
 void InliteHub::on_scan_end() {
   if (!this->auto_discover_) {
     return;
@@ -176,9 +216,13 @@ bool InliteHub::parse_device(const espbt::ESPBTDevice &device) {
 
 void InliteHub::loop() {
   bool connected_now = this->node_state == espbt::ClientState::ESTABLISHED && this->characteristics_ready_;
-  if (connected_now != this->last_connected_state_) {
+  bool was_connected = this->last_connected_state_;
+  if (connected_now != was_connected) {
     this->last_connected_state_ = connected_now;
     this->publish_connected_state_();
+  }
+  if (connected_now && !was_connected) {
+    this->queue_state_sync_request_(true);
   }
 
   if (!connected_now) {
@@ -188,7 +232,10 @@ void InliteHub::loop() {
   this->process_active_stream_();
 }
 
-void InliteHub::update() { this->request_rssi_(); }
+void InliteHub::update() {
+  this->request_rssi_();
+  this->queue_state_sync_request_(false);
+}
 
 void InliteHub::gattc_event_handler(esp_gattc_cb_event_t event, esp_gatt_if_t gattc_if,
                                     esp_ble_gattc_cb_param_t *param) {
@@ -284,6 +331,8 @@ void InliteHub::reset_ble_state_() {
 
   this->incoming_packet_buffer_.clear();
   this->active_stream_ = {};
+  this->has_received_state_snapshot_ = false;
+  this->last_state_sync_request_ms_ = 0;
 }
 
 bool InliteHub::configure_characteristics_() {
@@ -517,6 +566,7 @@ void InliteHub::handle_block_data_(const std::vector<uint8_t> &payload) {
       return;
     }
     uint8_t output_rtc_timer = payload.size() >= 7 ? payload[6] : 0;
+    this->has_received_state_snapshot_ = true;
     this->apply_line_mode_update_(payload[3], payload[4], payload[5], output_rtc_timer);
     return;
   }
@@ -540,6 +590,9 @@ void InliteHub::handle_block_data_(const std::vector<uint8_t> &payload) {
     size_t base = 3 + (i * 4);
     this->apply_line_mode_update_(payload[base], payload[base + 1], payload[base + 2],
                                   payload[base + 3]);
+  }
+  if (line_chunks > 0) {
+    this->has_received_state_snapshot_ = true;
   }
 }
 

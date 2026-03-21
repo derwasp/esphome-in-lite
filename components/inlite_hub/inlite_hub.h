@@ -67,6 +67,7 @@ class InliteHub : public ble_client::BLEClientNode,
   static constexpr uint8_t kCmdTypeRequest = 0x01;
   static constexpr uint16_t kOpcodeSetOutletMode = 4103;
   static constexpr uint16_t kOpcodeSetOutletBrightness = 4104;
+  static constexpr uint16_t kOpcodeGetInfoDevices = 5;
   static constexpr uint8_t kPktTypeStartFlush = 112;
   static constexpr uint8_t kPktTypeData = 113;
   static constexpr uint8_t kPktTypeAck = 114;
@@ -116,6 +117,7 @@ class InliteHub : public ble_client::BLEClientNode,
   bool configure_characteristics_();
   void process_active_stream_();
   bool retry_or_fail_();
+  void queue_state_sync_request_(bool force);
 
   bool send_stream_packet_(uint8_t packet_type, const std::vector<uint8_t> &data);
   bool send_encrypted_packet_(const std::vector<uint8_t> &encrypted_packet);
@@ -180,6 +182,8 @@ class InliteHub : public ble_client::BLEClientNode,
   std::vector<uint8_t> incoming_packet_buffer_;
   std::deque<QueuedMeshPayload> queue_;
   StreamState active_stream_;
+  bool has_received_state_snapshot_{false};
+  uint32_t last_state_sync_request_ms_{0};
 
   std::vector<InliteLineLight *> line_lights_;
 
