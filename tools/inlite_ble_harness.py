@@ -894,13 +894,16 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
-async def resolve_target_mac(args: argparse.Namespace) -> tuple[str | None, int]:
+async def resolve_target_mac(
+    args: argparse.Namespace, status_stream=sys.stdout
+) -> tuple[str | None, int]:
     target_mac = args.mac
 
     if args.auto_discover or not target_mac:
         match_address = args.discover_match_address or target_mac
         print(
-            f"autodiscovery scan {args.discover_seconds:.1f}s (name~{args.discover_name_filter!r}, service={UUID_MESH_SERVICE})"
+            f"autodiscovery scan {args.discover_seconds:.1f}s (name~{args.discover_name_filter!r}, service={UUID_MESH_SERVICE})",
+            file=status_stream,
         )
         try:
             rows = await discover_candidates(
@@ -925,7 +928,8 @@ async def resolve_target_mac(args: argparse.Namespace) -> tuple[str | None, int]
         rssi = "?" if best["rssi"] is None else str(best["rssi"])
         print(
             f"autodiscovery selected address={best['address']} name={best['name']} rssi={rssi} "
-            f"name_hit={str(best['name_hit']).lower()} service_hit={str(best['service_hit']).lower()}"
+            f"name_hit={str(best['name_hit']).lower()} service_hit={str(best['service_hit']).lower()}",
+            file=status_stream,
         )
 
     if not target_mac:
@@ -1026,7 +1030,9 @@ async def run_query(args: argparse.Namespace) -> int:
         print(f"ERROR: {exc}", file=sys.stderr)
         return 2
 
-    target_mac, rc = await resolve_target_mac(args)
+    status_stream = sys.stderr if args.json else sys.stdout
+
+    target_mac, rc = await resolve_target_mac(args, status_stream=status_stream)
     if rc != 0 or target_mac is None:
         return rc
 
@@ -1037,10 +1043,17 @@ async def run_query(args: argparse.Namespace) -> int:
 
     crypto = InliteCrypto(passphrase_value, controller_id=controller_id)
 
+    if args.verbose and args.json:
+        print(
+            "INFO: --json enabled; suppressing verbose packet logs to keep stdout valid JSON.",
+            file=sys.stderr,
+        )
+
     print(
-        f"connecting mac={target_mac} hub_id=0x{args.hub_id:04x} controller_id=0x{controller_id:04x}"
+        f"connecting mac={target_mac} hub_id=0x{args.hub_id:04x} controller_id=0x{controller_id:04x}",
+        file=status_stream,
     )
-    print(f"write_with_response={args.write_with_response}")
+    print(f"write_with_response={args.write_with_response}", file=status_stream)
 
     try:
         async with InliteBleHarness(
@@ -1050,12 +1063,12 @@ async def run_query(args: argparse.Namespace) -> int:
             timeout_ms=args.timeout_ms,
             retries=args.retries,
             write_with_response=args.write_with_response,
-            verbose=args.verbose,
+            verbose=args.verbose and not args.json,
         ) as h:
             if args.trigger_get_info:
-                print("sending GET_INFO_DEVICES (opcode 5) trigger")
+                print("sending GET_INFO_DEVICES (opcode 5) trigger", file=status_stream)
                 await h.send_stream(cmd_get_info_devices())
-            print(f"listening for line updates for {args.listen_seconds:.1f}s")
+            print(f"listening for line updates for {args.listen_seconds:.1f}s", file=status_stream)
             states = h.get_line_modes_snapshot()
             if args.listen_seconds > 0:
                 states = await h.collect_line_modes(args.listen_seconds)
@@ -1080,7 +1093,10 @@ async def run_query(args: argparse.Namespace) -> int:
                 file=sys.stderr,
             )
             return 1
-        print("no line-state updates received")
+        if args.json:
+            print(json.dumps({"line_states": []}, indent=2, sort_keys=True))
+        else:
+            print("no line-state updates received")
         return 0
 
     if args.json:

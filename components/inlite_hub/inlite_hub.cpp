@@ -941,9 +941,7 @@ void InliteLineLight::apply_remote_mode(uint8_t output_mode, uint8_t output_stat
   this->last_output_rtc_timer_ = output_rtc_timer;
 
   bool on = output_mode_is_on(output_mode);
-  if (!on) {
-    this->last_brightness_ = 0;
-  } else if (this->last_brightness_ == 0) {
+  if (on && this->last_brightness_ == 0) {
     this->last_brightness_ = 255;
   }
 
