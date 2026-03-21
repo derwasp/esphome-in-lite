@@ -41,7 +41,7 @@ curl -sS https://api.inlite.coffeeit.nl/user/login \
   --data '{"email":"YOUR_EMAIL","code":"CODE_FROM_EMAIL"}' > /tmp/inlite_login.json
 ```
 
-## 3) Extract garden IDs and passphrase hex
+## 3) Extract hub IDs and passphrase hex
 
 ```bash
 python3 - <<'PY'
@@ -50,9 +50,12 @@ from pathlib import Path
 
 obj = json.loads(Path('/tmp/inlite_login.json').read_text())
 for g in obj.get('gardens', []):
-    gid = int(g.get('_id', 0))
     pwd = g.get('password', '')
-    print(f"name={g.get('name','')} hub_id_dec={gid} hub_id_hex=0x{gid:04X} passphrase_hex={pwd.encode('utf-8').hex()}")
+    for t in g.get('transformers', []):
+        gid = t.get('deviceId')
+        if isinstance(gid, int):
+            tname = t.get('name', '')
+            print(f"name={g.get('name','')} transformer={tname} hub_id_dec={gid} hub_id_hex=0x{gid:04X} passphrase_hex={pwd.encode('utf-8').hex()}")
 PY
 ```
 

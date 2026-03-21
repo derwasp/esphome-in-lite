@@ -54,7 +54,12 @@ def prompt(label: str, default: str | None = None) -> str:
     return default or ""
 
 
-def run_curl_json(url: str, payload: dict[str, Any]) -> dict[str, Any]:
+def run_curl_json(
+    url: str,
+    payload: dict[str, Any],
+    *,
+    allow_empty: bool = False,
+) -> dict[str, Any]:
     cmd = [
         "curl",
         "-sS",
@@ -69,6 +74,8 @@ def run_curl_json(url: str, payload: dict[str, Any]) -> dict[str, Any]:
         fail(f"curl failed for {url}: {proc.stderr.strip() or f'exit {proc.returncode}'}")
     text = proc.stdout.strip()
     if not text:
+        if allow_empty:
+            return {}
         fail(f"empty response from {url}")
     try:
         obj = json.loads(text)
@@ -77,6 +84,31 @@ def run_curl_json(url: str, payload: dict[str, Any]) -> dict[str, Any]:
     if not isinstance(obj, dict):
         fail(f"unexpected JSON shape from {url}")
     return obj
+
+
+def parse_mesh_id(value: Any) -> int | None:
+    if isinstance(value, int):
+        return value if 0 <= value <= 0xFFFF else None
+
+    if not isinstance(value, str):
+        return None
+
+    raw = value.strip()
+    if not raw:
+        return None
+
+    if raw.lower().startswith("0x"):
+        try:
+            parsed = int(raw, 16)
+        except ValueError:
+            return None
+        return parsed if 0 <= parsed <= 0xFFFF else None
+
+    if raw.isdigit():
+        parsed = int(raw, 10)
+        return parsed if 0 <= parsed <= 0xFFFF else None
+
+    return None
 
 
 def parse_lines(value: str) -> list[int]:
@@ -289,7 +321,11 @@ def main() -> int:
         fail("email is required")
 
     print(f"Requesting login code for {email} ...")
-    auth_resp = run_curl_json(AUTHORIZE_URL, {"email": email, "language": "en"})
+    auth_resp = run_curl_json(
+        AUTHORIZE_URL,
+        {"email": email, "language": "en"},
+        allow_empty=True,
+    )
     if "error" in auth_resp:
         fail(f"authorize failed: {auth_resp.get('error')}")
     print("Login code requested. Check your email.")
@@ -317,31 +353,57 @@ def main() -> int:
     for g in gardens:
         if not isinstance(g, dict):
             continue
-        gid_raw = g.get("_id")
         pwd = g.get("password")
-        if gid_raw is None or not isinstance(pwd, str):
+        if not isinstance(pwd, str):
             continue
-        try:
-            gid = int(gid_raw)
-        except Exception:
-            continue
-        name = str(g.get("name") or f"garden_{gid}")
-        parsed_gardens.append(
-            {
-                "name": name,
-                "hub_id": gid,
-                "hub_id_hex": f"0x{gid:04X}",
-                "passphrase_hex": pwd.encode("utf-8").hex(),
-            }
-        )
+        garden_name = str(g.get("name") or "garden")
+        passphrase_hex = pwd.encode("utf-8").hex()
+
+        transformers = g.get("transformers")
+        candidate_hubs: list[dict[str, Any]] = []
+        if isinstance(transformers, list):
+            for t in transformers:
+                if not isinstance(t, dict):
+                    continue
+                hub_id = None
+                for key in ("deviceId", "hubId", "meshId"):
+                    hub_id = parse_mesh_id(t.get(key))
+                    if hub_id is not None:
+                        break
+                if hub_id is None:
+                    continue
+                candidate_hubs.append(
+                    {
+                        "hub_id": hub_id,
+                        "hub_name": str(t.get("name") or ""),
+                    }
+                )
+
+        if not candidate_hubs:
+            # Backward compatibility if API shape differs.
+            fallback_id = parse_mesh_id(g.get("_id"))
+            if fallback_id is not None:
+                candidate_hubs.append({"hub_id": fallback_id, "hub_name": ""})
+
+        for hub in candidate_hubs:
+            parsed_gardens.append(
+                {
+                    "name": garden_name,
+                    "hub_name": hub["hub_name"],
+                    "hub_id": hub["hub_id"],
+                    "hub_id_hex": f"0x{hub['hub_id']:04X}",
+                    "passphrase_hex": passphrase_hex,
+                }
+            )
 
     if not parsed_gardens:
         fail("no valid gardens with id/password in login response")
 
     print("\nAvailable gardens:")
     for idx, g in enumerate(parsed_gardens, start=1):
+        hub_label = f" ({g['hub_name']})" if g.get("hub_name") else ""
         print(
-            f"  {idx}. {g['name']}  hub_id={g['hub_id_hex']}  passphrase_hex={g['passphrase_hex']}"
+            f"  {idx}. {g['name']}{hub_label}  hub_id={g['hub_id_hex']}  passphrase_hex={g['passphrase_hex']}"
         )
 
     if args.garden_index is not None:
