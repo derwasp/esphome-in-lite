@@ -1,12 +1,20 @@
 # Quickstart
 
-## 0) Optional: generate a full YAML automatically
+## 0) Create and activate a venv (recommended)
+
+```bash
+python3 -m venv .venv
+source .venv/bin/activate
+pip install -r requirements-dev.txt
+```
+
+## 1) Optional: generate a full YAML automatically
 
 ```bash
 python3 tools/inlite_config_wizard.py
 ```
 
-## 1) Add external component
+## 2) Add external component
 
 ```yaml
 external_components:
@@ -17,7 +25,7 @@ external_components:
     components: [inlite_hub]
 ```
 
-## 2) Configure BLE
+## 3) Configure BLE
 
 ```yaml
 esp32_ble:
@@ -36,7 +44,7 @@ ble_client:
     auto_connect: false
 ```
 
-## 3) Configure hub
+## 4) Configure hub
 
 ```yaml
 inlite_hub:
@@ -52,7 +60,7 @@ inlite_hub:
     poll_interval: 15s
 ```
 
-## 4) Add lines
+## 5) Add lines
 
 ```yaml
 light:
@@ -70,14 +78,14 @@ light:
     name: In-lite Line 3
 ```
 
-## 5) Validate
+## 6) Validate
 
 ```bash
 esphome config your_node.yaml
 esphome compile your_node.yaml
 ```
 
-## 6) Test with Python harness (optional)
+## 7) Test with Python harness (optional)
 
 ```bash
 pip install -r requirements-harness.txt

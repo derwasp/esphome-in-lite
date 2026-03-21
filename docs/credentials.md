@@ -8,6 +8,16 @@ You can retrieve both from in-lite API login response.
 
 ## Fast path (recommended): interactive wizard
 
+Set up a virtual environment first:
+
+```bash
+python3 -m venv .venv
+source .venv/bin/activate
+pip install -r requirements-dev.txt
+```
+
+Then run the wizard:
+
 ```bash
 python3 tools/inlite_config_wizard.py
 ```

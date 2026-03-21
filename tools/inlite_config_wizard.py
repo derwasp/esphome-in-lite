@@ -173,6 +173,16 @@ def run_logged_command(
     return proc.returncode, stdout, stderr
 
 
+def venv_instructions() -> str:
+    return (
+        "Run the wizard inside a virtual environment:\n"
+        "  python3 -m venv .venv\n"
+        "  source .venv/bin/activate\n"
+        "  pip install -r requirements-dev.txt\n"
+        "  python3 tools/inlite_config_wizard.py"
+    )
+
+
 def verify_connectivity(
     *,
     diag_dir: Path,
@@ -198,11 +208,18 @@ def verify_connectivity(
         "--name-filter",
         "inlite",
     ]
-    scan_rc, scan_out, _ = run_logged_command(
+    scan_rc, scan_out, scan_err = run_logged_command(
         scan_cmd,
         log_path=verify_dir / "01_scan.log",
     )
     if scan_rc != 0:
+        err_all = f"{scan_out}\n{scan_err}".lower()
+        if "bleak is required" in err_all or "pycryptodomex" in err_all:
+            fail(
+                "discovery failed because Python dependencies are missing for the harness.\n"
+                f"{venv_instructions()}\n"
+                f"See {verify_dir / '01_scan.log'}"
+            )
         fail(f"discovery failed. See {verify_dir / '01_scan.log'}")
 
     match = re.search(r"^best_address=(.+)$", scan_out, flags=re.MULTILINE)
@@ -495,6 +512,12 @@ def main() -> int:
     diag_dir = Path(".inlite_wizard") / f"run_{run_id}_{os.getpid()}"
     diag_dir.mkdir(parents=True, exist_ok=True)
     print(f"Diagnostics directory: {diag_dir}")
+
+    if getattr(sys, "base_prefix", sys.prefix) == sys.prefix:
+        print(
+            "WARNING: You are not running inside a virtual environment.\n"
+            f"{venv_instructions()}"
+        )
 
     email = (args.email or prompt("in-lite email")).strip()
     if not email:

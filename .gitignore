@@ -5,3 +5,4 @@ __pycache__/
 .venv/
 .env
 .inlite_wizard/
+generated/

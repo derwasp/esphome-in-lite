@@ -28,6 +28,14 @@ Hub BLE MAC is optional when autodiscovery is enabled.
 
 ## Quick Start
 
+0. Use a virtual environment (recommended):
+
+```bash
+python3 -m venv .venv
+source .venv/bin/activate
+pip install -r requirements-dev.txt
+```
+
 1. Get `hub_id` and `network_passphrase_hex`:
 - Follow `docs/credentials.md`.
 
@@ -90,6 +98,7 @@ esphome compile your_node.yaml
 2. Install Python harness deps:
 
 ```bash
+# if not already installed via requirements-dev.txt
 pip install -r requirements-harness.txt
 ```
 
