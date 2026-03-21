@@ -54,6 +54,18 @@ esphome config your_node.yaml
 esphome compile your_node.yaml
 ```
 
+## Devcontainer
+
+This repo includes a devcontainer with required build/runtime tooling:
+- ESPHome CLI
+- Python harness dependencies (`bleak`, `pycryptodomex`)
+- system tools used by scripts/docs (`curl`, `jq`)
+
+Use it:
+1. Open the repo in VS Code.
+2. Run `Dev Containers: Reopen in Container`.
+3. Wait for post-create install to finish (`pip3 install -r requirements-dev.txt`).
+
 ## Testing
 
 1. Validate ESPHome config/build:
