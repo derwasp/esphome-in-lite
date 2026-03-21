@@ -1,0 +1,33 @@
+esphome:
+  name: ci-inlite-smoke
+
+esp32:
+  board: esp32dev
+  framework:
+    type: esp-idf
+
+logger:
+
+external_components:
+  - source:
+      type: local
+      path: ../components
+    components: [inlite_hub]
+
+esp32_ble:
+  max_connections: 1
+
+esp32_ble_tracker:
+  id: inlite_ble_tracker_id
+
+ble_client:
+  - mac_address: "00:00:00:00:00:00"
+    id: inlite_ble_id
+    auto_connect: false
+
+inlite_hub:
+  - id: inlite_hub_main
+    ble_client_id: inlite_ble_id
+    esp32_ble_id: inlite_ble_tracker_id
+    hub_id: 0x163E
+    network_passphrase_hex: "74657374"
