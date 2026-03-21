@@ -2,6 +2,8 @@
 
 ESPHome external component for local BLE control of in-lite Smart Hub-150.
 
+> Work in progress: this integration is functional but still under active reverse-engineering and hardening.
+
 Current scope (v1):
 - Line control (on/off + brightness)
 - BLE diagnostics (RSSI, connection state, last command status)
@@ -52,21 +54,28 @@ esphome config your_node.yaml
 esphome compile your_node.yaml
 ```
 
-## Harness Validation (optional but recommended)
+## Testing
 
-Install harness deps:
+1. Validate ESPHome config/build:
+
+```bash
+esphome config your_node.yaml
+esphome compile your_node.yaml
+```
+
+2. Install Python harness deps:
 
 ```bash
 pip install -r requirements-harness.txt
 ```
 
-Run selftest:
+3. Run harness selftest:
 
 ```bash
 python3 tools/inlite_ble_harness.py selftest
 ```
 
-End-to-end command (autodiscovery + send):
+4. Run end-to-end BLE test (autodiscovery + send):
 
 ```bash
 python3 tools/inlite_ble_harness.py \

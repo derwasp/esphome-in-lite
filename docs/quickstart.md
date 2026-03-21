@@ -70,3 +70,17 @@ light:
 esphome config your_node.yaml
 esphome compile your_node.yaml
 ```
+
+## 6) Test with Python harness (optional)
+
+```bash
+pip install -r requirements-harness.txt
+python3 tools/inlite_ble_harness.py selftest
+python3 tools/inlite_ble_harness.py \
+  --hub-id 0x163E \
+  --passphrase-hex YOUR_HEX \
+  --timeout-ms 1200 \
+  --retries 4 \
+  --verbose \
+  line 1 on --brightness 180 --auto-discover --discover-seconds 12
+```
