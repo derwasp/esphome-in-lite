@@ -14,7 +14,7 @@ InliteLineLight = inlite_hub_ns.class_(
 )
 
 CONFIG_SCHEMA = cv.All(
-    light.BRIGHTNESS_ONLY_LIGHT_SCHEMA.extend(
+    light.BINARY_LIGHT_SCHEMA.extend(
         {
             cv.GenerateID(CONF_OUTPUT_ID): cv.declare_id(InliteLineLight),
             cv.GenerateID(CONF_INLITE_HUB_ID): cv.use_id(InliteHub),
