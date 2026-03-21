@@ -20,6 +20,14 @@ What it does:
 - shows all returned gardens and lets you select one if multiple are returned
 - prints selected `hub_id` + `passphrase_hex`
 - generates a full ESPHome YAML file
+- writes raw diagnostics files under the current directory for each run:
+  - `./.inlite_wizard/run_<timestamp>_<pid>/`
+  - `authorize_request.json`
+  - `authorize_response.raw.txt`
+  - `authorize_response.parsed.json`
+  - `login_request.json`
+  - `login_response.raw.txt`
+  - `login_response.parsed.json`
 
 ---
 

@@ -19,6 +19,8 @@ import re
 import secrets
 import subprocess
 import sys
+from dataclasses import dataclass
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -54,12 +56,34 @@ def prompt(label: str, default: str | None = None) -> str:
     return default or ""
 
 
+@dataclass
+class CurlJsonResult:
+    obj: dict[str, Any]
+    request_path: Path | None
+    raw_response_path: Path | None
+    parsed_response_path: Path | None
+
+
+def write_diag_file(diag_dir: Path | None, filename: str, content: str) -> Path | None:
+    if diag_dir is None:
+        return None
+    diag_dir.mkdir(parents=True, exist_ok=True)
+    out = diag_dir / filename
+    out.write_text(content)
+    return out
+
+
 def run_curl_json(
     url: str,
     payload: dict[str, Any],
     *,
     allow_empty: bool = False,
-) -> dict[str, Any]:
+    diag_dir: Path | None = None,
+    diag_prefix: str = "response",
+) -> CurlJsonResult:
+    request_text = json.dumps(payload, separators=(",", ":"))
+    request_path = write_diag_file(diag_dir, f"{diag_prefix}_request.json", request_text)
+
     cmd = [
         "curl",
         "-sS",
@@ -67,23 +91,48 @@ def run_curl_json(
         "-H",
         "Content-Type: application/json",
         "--data",
-        json.dumps(payload, separators=(",", ":")),
+        request_text,
     ]
     proc = subprocess.run(cmd, capture_output=True, text=True)
+    raw_path = write_diag_file(
+        diag_dir,
+        f"{diag_prefix}_response.raw.txt",
+        proc.stdout,
+    )
     if proc.returncode != 0:
-        fail(f"curl failed for {url}: {proc.stderr.strip() or f'exit {proc.returncode}'}")
+        diag_hint = f" (raw response: {raw_path})" if raw_path is not None else ""
+        fail(
+            f"curl failed for {url}: {proc.stderr.strip() or f'exit {proc.returncode}'}{diag_hint}"
+        )
     text = proc.stdout.strip()
     if not text:
         if allow_empty:
-            return {}
+            parsed_path = write_diag_file(diag_dir, f"{diag_prefix}_response.parsed.json", "{}")
+            return CurlJsonResult(
+                obj={},
+                request_path=request_path,
+                raw_response_path=raw_path,
+                parsed_response_path=parsed_path,
+            )
         fail(f"empty response from {url}")
     try:
         obj = json.loads(text)
     except json.JSONDecodeError:
-        fail(f"non-JSON response from {url}: {text[:200]}")
+        diag_hint = f" (raw response: {raw_path})" if raw_path is not None else ""
+        fail(f"non-JSON response from {url}: {text[:200]}{diag_hint}")
     if not isinstance(obj, dict):
         fail(f"unexpected JSON shape from {url}")
-    return obj
+    parsed_path = write_diag_file(
+        diag_dir,
+        f"{diag_prefix}_response.parsed.json",
+        json.dumps(obj, indent=2),
+    )
+    return CurlJsonResult(
+        obj=obj,
+        request_path=request_path,
+        raw_response_path=raw_path,
+        parsed_response_path=parsed_path,
+    )
 
 
 def parse_mesh_id(value: Any) -> int | None:
@@ -315,29 +364,46 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> int:
     args = parse_args()
+    run_id = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    diag_dir = Path(".inlite_wizard") / f"run_{run_id}_{os.getpid()}"
+    diag_dir.mkdir(parents=True, exist_ok=True)
+    print(f"Diagnostics directory: {diag_dir}")
 
     email = (args.email or prompt("in-lite email")).strip()
     if not email:
         fail("email is required")
 
     print(f"Requesting login code for {email} ...")
-    auth_resp = run_curl_json(
+    auth_result = run_curl_json(
         AUTHORIZE_URL,
         {"email": email, "language": "en"},
         allow_empty=True,
+        diag_dir=diag_dir,
+        diag_prefix="authorize",
     )
+    auth_resp = auth_result.obj
     if "error" in auth_resp:
         fail(f"authorize failed: {auth_resp.get('error')}")
     print("Login code requested. Check your email.")
+    if auth_result.raw_response_path is not None:
+        print(f"Raw authorize response: {auth_result.raw_response_path}")
 
     code = (args.code or prompt("Enter login code from email")).strip()
     if not code:
         fail("login code is required")
 
     print("Logging in and fetching gardens ...")
-    login_resp = run_curl_json(LOGIN_URL, {"email": email, "code": code})
+    login_result = run_curl_json(
+        LOGIN_URL,
+        {"email": email, "code": code},
+        diag_dir=diag_dir,
+        diag_prefix="login",
+    )
+    login_resp = login_result.obj
     if "error" in login_resp:
         fail(f"login failed: {login_resp.get('error')}")
+    if login_result.raw_response_path is not None:
+        print(f"Raw login response: {login_result.raw_response_path}")
 
     if args.save_login_json:
         save_path = Path(args.save_login_json)
@@ -435,7 +501,7 @@ def main() -> int:
         device_name_input = args.device_name.strip()
     if not device_name_input:
         fail("device name cannot be empty")
-    device_name = slugify_name(device_name_input, default=default_device_name)
+    device_name = slugify_name(device_name_input, fallback=default_device_name)
 
     default_friendly = f"in-lite {selected['name']} Bridge"
     if args.friendly_name is None:
@@ -484,6 +550,13 @@ def main() -> int:
 
     print("\nGenerated files/values:")
     print(f"  yaml={output_path}")
+    print(f"  diagnostics_dir={diag_dir}")
+    if auth_result.raw_response_path is not None:
+        print(f"  authorize_raw={auth_result.raw_response_path}")
+    if login_result.raw_response_path is not None:
+        print(f"  login_raw={login_result.raw_response_path}")
+    if login_result.parsed_response_path is not None:
+        print(f"  login_parsed={login_result.parsed_response_path}")
     print(f"  hub_id={selected['hub_id_hex']}")
     print(f"  passphrase_hex={selected['passphrase_hex']}")
     print(f"  lines={','.join(str(x) for x in lines)}")
