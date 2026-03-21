@@ -58,6 +58,7 @@ inlite_hub:
     command_timeout: 600ms
     retries: 2
     poll_interval: 15s
+    state_refresh_interval: 5min
 ```
 
 ## 5) Add lines
