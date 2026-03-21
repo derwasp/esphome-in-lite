@@ -15,6 +15,7 @@ import argparse
 import asyncio
 import hashlib
 import hmac
+import json
 import os
 import random
 import re
@@ -50,13 +51,19 @@ UUID_COMPLETE_WR = "c4edc000-9daf-11e3-8004-10025b000b00"
 PKT_TYPE_START_FLUSH = 112
 PKT_TYPE_DATA = 113
 PKT_TYPE_ACK = 114
+PKT_TYPE_BLOCK_DATA = 115
 END_ACK_MAGIC = 0xEF
 MAX_STREAM_CHUNK = 62
 BLE_CHUNK = 78
 DEFAULT_TTL = 5
 
+CMD_TYPE_OOB = 0x03
+
 OPCODE_SET_OUTLET_MODE = 4103
 OPCODE_SET_OUTLET_BRIGHTNESS = 4104
+OPCODE_GET_INFO_DEVICES = 5
+OPCODE_OOB_OUTLET_MODE_UPDATE = 24
+OPCODE_OOB_ALL_OUTLETS_MODE_UPDATE = 33
 
 
 @dataclass
@@ -67,6 +74,61 @@ class DecryptedPacket:
     packet_type: int
     ttl: int
     payload: bytes
+
+
+@dataclass(frozen=True)
+class LineModeState:
+    line_id: int
+    output_mode: int
+    output_state: int
+    output_rtc_timer: int
+
+    @property
+    def on(self) -> bool:
+        return (self.output_mode & 0x01) != 0
+
+
+def parse_block_line_mode_updates(payload: bytes) -> list[LineModeState]:
+    if len(payload) < 3:
+        return []
+
+    cmd_type = payload[0]
+    opcode = payload[1] | (payload[2] << 8)
+    if cmd_type != CMD_TYPE_OOB:
+        return []
+
+    if opcode == OPCODE_OOB_OUTLET_MODE_UPDATE:
+        if len(payload) < 6:
+            return []
+        rtc = payload[6] if len(payload) >= 7 else 0
+        return [
+            LineModeState(
+                line_id=payload[3],
+                output_mode=payload[4],
+                output_state=payload[5],
+                output_rtc_timer=rtc,
+            )
+        ]
+
+    if opcode != OPCODE_OOB_ALL_OUTLETS_MODE_UPDATE:
+        return []
+
+    body = payload[3:]
+    if len(body) < 4:
+        return []
+
+    usable_len = len(body) - (len(body) % 4)
+    out: list[LineModeState] = []
+    for i in range(0, usable_len, 4):
+        out.append(
+            LineModeState(
+                line_id=body[i],
+                output_mode=body[i + 1],
+                output_state=body[i + 2],
+                output_rtc_timer=body[i + 3],
+            )
+        )
+    return out
 
 
 class InliteCrypto:
@@ -219,6 +281,8 @@ class InliteBleHarness:
         self.client = BleakClient(mac)
         self._incoming = bytearray()
         self._ack_queue: asyncio.Queue[tuple[int, bool]] = asyncio.Queue()
+        self._line_mode_queue: asyncio.Queue[list[LineModeState]] = asyncio.Queue()
+        self._line_modes: dict[int, LineModeState] = {}
 
     async def __aenter__(self) -> "InliteBleHarness":
         await self.client.connect()
@@ -264,6 +328,26 @@ class InliteBleHarness:
             offset = decrypted.payload[0] | (decrypted.payload[1] << 8)
             end_ack = len(decrypted.payload) >= 3 and decrypted.payload[2] == END_ACK_MAGIC
             self._ack_queue.put_nowait((offset, end_ack))
+            return
+
+        if (
+            decrypted.packet_type == PKT_TYPE_BLOCK_DATA
+            and decrypted.source_id == self.hub_id
+        ):
+            updates = parse_block_line_mode_updates(decrypted.payload)
+            if not updates:
+                return
+            for update in updates:
+                self._line_modes[update.line_id] = update
+            self._line_mode_queue.put_nowait(updates)
+            self._log(
+                "[state] "
+                + ", ".join(
+                    f"line={u.line_id} on={str(u.on).lower()} mode=0x{u.output_mode:02x} "
+                    f"state=0x{u.output_state:02x} rtc={u.output_rtc_timer}"
+                    for u in updates
+                )
+            )
 
     async def _send_encrypted_packet(self, packet: bytes) -> None:
         for i in range(0, len(packet), BLE_CHUNK):
@@ -299,6 +383,22 @@ class InliteBleHarness:
                 continue
 
             return True
+
+    def get_line_modes_snapshot(self) -> dict[int, LineModeState]:
+        return dict(self._line_modes)
+
+    async def collect_line_modes(self, duration_s: float) -> dict[int, LineModeState]:
+        duration = max(0.0, duration_s)
+        deadline = asyncio.get_running_loop().time() + duration
+        while True:
+            remaining = deadline - asyncio.get_running_loop().time()
+            if remaining <= 0:
+                break
+            try:
+                await asyncio.wait_for(self._line_mode_queue.get(), timeout=remaining)
+            except asyncio.TimeoutError:
+                break
+        return self.get_line_modes_snapshot()
 
     async def send_stream(self, payload: bytes) -> None:
         # START_FLUSH (offset 0)
@@ -370,6 +470,10 @@ def cmd_set_outlet_brightness(line_id: int, brightness: int) -> bytes:
         OPCODE_SET_OUTLET_BRIGHTNESS,
         bytes([line_id & 0xFF, max(0, min(255, brightness))]),
     )
+
+
+def cmd_get_info_devices() -> bytes:
+    return mesh_command(OPCODE_GET_INFO_DEVICES, b"")
 
 
 def is_mac_address(value: str) -> bool:
@@ -628,6 +732,21 @@ def run_selftest() -> int:
         print("selftest failed: decrypted payload mismatch", file=sys.stderr)
         return 1
 
+    sample_oob_all = bytes.fromhex("032100000000000101010002000000")
+    parsed_all = parse_block_line_mode_updates(sample_oob_all)
+    if len(parsed_all) != 3:
+        print("selftest failed: OOB all-lines parser count mismatch", file=sys.stderr)
+        return 1
+    if parsed_all[1].line_id != 1 or not parsed_all[1].on:
+        print("selftest failed: OOB all-lines parser value mismatch", file=sys.stderr)
+        return 1
+
+    sample_oob_single = bytes.fromhex("03180002010100")
+    parsed_single = parse_block_line_mode_updates(sample_oob_single)
+    if len(parsed_single) != 1 or parsed_single[0].line_id != 2 or not parsed_single[0].on:
+        print("selftest failed: OOB single-line parser mismatch", file=sys.stderr)
+        return 1
+
     print("selftest passed")
     return 0
 
@@ -689,7 +808,7 @@ def parse_args() -> argparse.Namespace:
     scan.add_argument("--all", action="store_true", help="Show all devices from scan")
 
     line = sub.add_parser("line", help="Set line on/off (+ optional brightness)")
-    line.add_argument("line", type=int, help="Line number (1..16)")
+    line.add_argument("line", type=int, help="Line number (0..15)")
     line.add_argument("state", choices=["on", "off"])
     line.add_argument(
         "--brightness",
@@ -719,26 +838,72 @@ def parse_args() -> argparse.Namespace:
         help="Preferred address during autodiscovery (MAC or CoreBluetooth UUID)",
     )
 
+    query = sub.add_parser(
+        "query",
+        help="Listen for line-state updates (OOB opcodes 24/33) and print current states",
+    )
+    query.add_argument(
+        "--auto-discover",
+        action="store_true",
+        help="Auto-discover hub address before querying (also implied when --mac is omitted)",
+    )
+    query.add_argument(
+        "--discover-seconds",
+        type=float,
+        default=12.0,
+        help="Discovery scan duration for query autodiscovery",
+    )
+    query.add_argument(
+        "--discover-name-filter",
+        default="inlite",
+        help="Discovery name substring filter for query autodiscovery",
+    )
+    query.add_argument(
+        "--discover-match-address",
+        default=None,
+        help="Preferred address during autodiscovery (MAC or CoreBluetooth UUID)",
+    )
+    query.add_argument(
+        "--listen-seconds",
+        type=float,
+        default=6.0,
+        help="Seconds to listen for line updates after connect/trigger (default: 6.0)",
+    )
+    query.add_argument(
+        "--trigger-get-info",
+        action="store_true",
+        help="Send opcode 5 GET_INFO_DEVICES before listening (experimental)",
+    )
+    query.add_argument(
+        "--line",
+        type=int,
+        default=None,
+        help="Optional line id filter (0..15)",
+    )
+    query.add_argument(
+        "--json",
+        action="store_true",
+        help="Emit JSON instead of text lines",
+    )
+    query.add_argument(
+        "--allow-empty",
+        action="store_true",
+        help="Exit 0 even when no line-state updates were received",
+    )
+
     return parser.parse_args()
 
 
-async def run_line(args: argparse.Namespace) -> int:
-    if args.hub_id is None:
-        print("ERROR: --hub-id is required for line commands", file=sys.stderr)
-        return 2
-
-    try:
-        passphrase_value = resolve_passphrase(args.passphrase_hex)
-    except ValueError as exc:
-        print(f"ERROR: {exc}", file=sys.stderr)
-        return 2
-
+async def resolve_target_mac(
+    args: argparse.Namespace, status_stream=sys.stdout
+) -> tuple[str | None, int]:
     target_mac = args.mac
 
     if args.auto_discover or not target_mac:
         match_address = args.discover_match_address or target_mac
         print(
-            f"autodiscovery scan {args.discover_seconds:.1f}s (name~{args.discover_name_filter!r}, service={UUID_MESH_SERVICE})"
+            f"autodiscovery scan {args.discover_seconds:.1f}s (name~{args.discover_name_filter!r}, service={UUID_MESH_SERVICE})",
+            file=status_stream,
         )
         try:
             rows = await discover_candidates(
@@ -748,7 +913,7 @@ async def run_line(args: argparse.Namespace) -> int:
             )
         except Exception as exc:
             print(f"ERROR: autodiscovery failed: {exc}", file=sys.stderr)
-            return 1
+            return None, 1
 
         if not rows:
             print("ERROR: autodiscovery found no matching hub", file=sys.stderr)
@@ -756,19 +921,20 @@ async def run_line(args: argparse.Namespace) -> int:
                 "tip: keep hub powered, close the in-lite app on iPhone, and retry with a longer scan.",
                 file=sys.stderr,
             )
-            return 1
+            return None, 1
 
         best = rows[0]
         target_mac = best["address"]
         rssi = "?" if best["rssi"] is None else str(best["rssi"])
         print(
             f"autodiscovery selected address={best['address']} name={best['name']} rssi={rssi} "
-            f"name_hit={str(best['name_hit']).lower()} service_hit={str(best['service_hit']).lower()}"
+            f"name_hit={str(best['name_hit']).lower()} service_hit={str(best['service_hit']).lower()}",
+            file=status_stream,
         )
 
     if not target_mac:
         print("ERROR: --mac is required when autodiscovery is disabled", file=sys.stderr)
-        return 2
+        return None, 2
 
     if sys.platform == "darwin" and is_mac_address(target_mac):
         print(
@@ -776,9 +942,30 @@ async def run_line(args: argparse.Namespace) -> int:
             file=sys.stderr,
         )
         print(
-            "INFO: Run `... inlite_ble_harness.py scan --seconds 12 --name-filter inlite` or use `line --auto-discover`.",
+            "INFO: Run `... inlite_ble_harness.py scan --seconds 12 --name-filter inlite` or use command --auto-discover.",
             file=sys.stderr,
         )
+
+    return target_mac, 0
+
+
+async def run_line(args: argparse.Namespace) -> int:
+    if args.hub_id is None:
+        print("ERROR: --hub-id is required for line commands", file=sys.stderr)
+        return 2
+    if args.line < 0 or args.line > 15:
+        print("ERROR: line must be in range 0..15", file=sys.stderr)
+        return 2
+
+    try:
+        passphrase_value = resolve_passphrase(args.passphrase_hex)
+    except ValueError as exc:
+        print(f"ERROR: {exc}", file=sys.stderr)
+        return 2
+
+    target_mac, rc = await resolve_target_mac(args)
+    if rc != 0 or target_mac is None:
+        return rc
 
     if args.controller_id is None:
         controller_id = random.randint(32768, 65533)
@@ -821,6 +1008,124 @@ async def run_line(args: argparse.Namespace) -> int:
     return 0
 
 
+def format_line_mode_state(state: LineModeState) -> str:
+    return (
+        f"line={state.line_id} on={str(state.on).lower()} "
+        f"output_mode=0x{state.output_mode:02x} output_state=0x{state.output_state:02x} "
+        f"output_rtc_timer={state.output_rtc_timer}"
+    )
+
+
+async def run_query(args: argparse.Namespace) -> int:
+    if args.hub_id is None:
+        print("ERROR: --hub-id is required for query commands", file=sys.stderr)
+        return 2
+    if args.line is not None and (args.line < 0 or args.line > 15):
+        print("ERROR: --line must be in range 0..15", file=sys.stderr)
+        return 2
+
+    try:
+        passphrase_value = resolve_passphrase(args.passphrase_hex)
+    except ValueError as exc:
+        print(f"ERROR: {exc}", file=sys.stderr)
+        return 2
+
+    status_stream = sys.stderr if args.json else sys.stdout
+
+    target_mac, rc = await resolve_target_mac(args, status_stream=status_stream)
+    if rc != 0 or target_mac is None:
+        return rc
+
+    if args.controller_id is None:
+        controller_id = random.randint(32768, 65533)
+    else:
+        controller_id = args.controller_id
+
+    crypto = InliteCrypto(passphrase_value, controller_id=controller_id)
+
+    if args.verbose and args.json:
+        print(
+            "INFO: --json enabled; suppressing verbose packet logs to keep stdout valid JSON.",
+            file=sys.stderr,
+        )
+
+    print(
+        f"connecting mac={target_mac} hub_id=0x{args.hub_id:04x} controller_id=0x{controller_id:04x}",
+        file=status_stream,
+    )
+    print(f"write_with_response={args.write_with_response}", file=status_stream)
+
+    try:
+        async with InliteBleHarness(
+            mac=target_mac,
+            hub_id=args.hub_id,
+            crypto=crypto,
+            timeout_ms=args.timeout_ms,
+            retries=args.retries,
+            write_with_response=args.write_with_response,
+            verbose=args.verbose and not args.json,
+        ) as h:
+            if args.trigger_get_info:
+                print("sending GET_INFO_DEVICES (opcode 5) trigger", file=status_stream)
+                await h.send_stream(cmd_get_info_devices())
+            print(f"listening for line updates for {args.listen_seconds:.1f}s", file=status_stream)
+            states = h.get_line_modes_snapshot()
+            if args.listen_seconds > 0:
+                states = await h.collect_line_modes(args.listen_seconds)
+    except Exception as exc:
+        print(f"ERROR: {exc}", file=sys.stderr)
+        if sys.platform == "darwin" and "was not found" in str(exc):
+            print(
+                "HINT: Use scan mode to discover the current CoreBluetooth UUID and pass it in --mac.",
+                file=sys.stderr,
+            )
+        return 1
+
+    sorted_states = [states[k] for k in sorted(states)]
+    if args.line is not None:
+        sorted_states = [s for s in sorted_states if s.line_id == args.line]
+
+    if not sorted_states:
+        if not args.allow_empty:
+            print(
+                "ERROR: no line-state updates received. "
+                "Try a longer --listen-seconds, --trigger-get-info, or run a line command first.",
+                file=sys.stderr,
+            )
+            return 1
+        if args.json:
+            print(json.dumps({"line_states": []}, indent=2, sort_keys=True))
+        else:
+            print("no line-state updates received")
+        return 0
+
+    if args.json:
+        print(
+            json.dumps(
+                {
+                    "line_states": [
+                        {
+                            "line": s.line_id,
+                            "on": s.on,
+                            "output_mode": s.output_mode,
+                            "output_state": s.output_state,
+                            "output_rtc_timer": s.output_rtc_timer,
+                        }
+                        for s in sorted_states
+                    ]
+                },
+                indent=2,
+                sort_keys=True,
+            )
+        )
+    else:
+        print("line states:")
+        for state in sorted_states:
+            print(f"  {format_line_mode_state(state)}")
+
+    return 0
+
+
 def main() -> int:
     args = parse_args()
 
@@ -832,6 +1137,9 @@ def main() -> int:
 
     if args.command == "line":
         return asyncio.run(run_line(args))
+
+    if args.command == "query":
+        return asyncio.run(run_query(args))
 
     return 2
 

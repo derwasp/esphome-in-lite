@@ -70,6 +70,10 @@ class InliteHub : public ble_client::BLEClientNode,
   static constexpr uint8_t kPktTypeStartFlush = 112;
   static constexpr uint8_t kPktTypeData = 113;
   static constexpr uint8_t kPktTypeAck = 114;
+  static constexpr uint8_t kPktTypeBlockData = 115;
+  static constexpr uint8_t kCmdTypeOob = 0x03;
+  static constexpr uint16_t kOpcodeOobOutletModeUpdate = 24;
+  static constexpr uint16_t kOpcodeOobAllOutletsModeUpdate = 33;
   static constexpr uint8_t kTtlDefault = 5;
   static constexpr uint8_t kEndAckMagic = 0xEF;
   static constexpr size_t kMaxDataChunk = 62;
@@ -117,7 +121,10 @@ class InliteHub : public ble_client::BLEClientNode,
   bool send_encrypted_packet_(const std::vector<uint8_t> &encrypted_packet);
 
   void handle_mesh_packet_(const MeshPacket &packet);
+  void handle_block_data_(const std::vector<uint8_t> &payload);
   void handle_stream_ack_(uint16_t ack_offset, bool end_ack);
+  void apply_line_mode_update_(uint8_t line_id, uint8_t output_mode, uint8_t output_state,
+                               uint8_t output_rtc_timer);
   void finish_active_stream_(int status_code);
 
   std::vector<uint8_t> build_encrypted_packet_(uint16_t destination_id,
@@ -185,13 +192,21 @@ class InliteLineLight : public light::LightOutput, public Component {
  public:
   void set_parent(InliteHub *parent) { this->parent_ = parent; }
   void set_line(uint8_t line) { this->line_ = line; }
+  uint8_t get_line() const { return this->line_; }
 
+  void setup_state(light::LightState *state) override { this->state_ = state; }
   light::LightTraits get_traits() override;
   void write_state(light::LightState *state) override;
+  void apply_remote_mode(uint8_t output_mode, uint8_t output_state, uint8_t output_rtc_timer);
 
  protected:
   InliteHub *parent_{nullptr};
-  uint8_t line_{1};
+  light::LightState *state_{nullptr};
+  uint8_t line_{0};
+  uint8_t last_brightness_{255};
+  uint8_t last_output_mode_{0};
+  uint8_t last_output_state_{0};
+  uint8_t last_output_rtc_timer_{0};
 };
 
 }  // namespace inlite_hub

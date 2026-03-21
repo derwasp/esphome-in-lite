@@ -6,6 +6,7 @@ ESPHome external component for local BLE control of in-lite Smart Hub-150.
 
 Current scope (v1):
 - Line control (on/off + brightness)
+- Line state sync from hub OOB updates (opcodes 24/33)
 - BLE diagnostics (RSSI, connection state, last command status)
 - Runtime BLE autodiscovery on ESP32
 
@@ -47,8 +48,8 @@ python3 tools/inlite_config_wizard.py
 
 At the end, the wizard can optionally verify connectivity by:
 - discovering the hub
-- turning lines `1,2,3` ON
-- turning lines `1,2,3` OFF
+- turning lines `0,1,2` ON
+- turning lines `0,1,2` OFF
 
 2. Add external component to your ESPHome node:
 
@@ -117,7 +118,19 @@ python3 tools/inlite_ble_harness.py \
   --timeout-ms 1200 \
   --retries 4 \
   --verbose \
-  line 1 on --brightness 180 --auto-discover --discover-seconds 12
+  line 0 on --brightness 180 --auto-discover --discover-seconds 12
+```
+
+5. Query current line states from hub updates:
+
+```bash
+python3 tools/inlite_ble_harness.py \
+  --hub-id 0x163E \
+  --passphrase-hex YOUR_HEX \
+  --timeout-ms 1200 \
+  --retries 4 \
+  --verbose \
+  query --auto-discover --discover-seconds 12 --listen-seconds 6 --trigger-get-info
 ```
 
 5. Test/setup wizard flow:

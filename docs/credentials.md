@@ -31,7 +31,7 @@ What it does:
 - prints selected `hub_id` + `passphrase_hex`
 - generates a full ESPHome YAML file
 - asks whether to verify connectivity immediately
-  - if `yes`: runs discovery, turns lines `1,2,3` ON, then turns `1,2,3` OFF using the harness
+  - if `yes`: runs discovery, turns lines `0,1,2` ON, then turns `0,1,2` OFF using the harness
 - writes raw diagnostics files under the current directory for each run:
   - `./.inlite_wizard/run_<timestamp>_<pid>/`
   - `authorize_request.json`

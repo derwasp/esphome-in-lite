@@ -66,16 +66,16 @@ inlite_hub:
 light:
   - platform: inlite_hub
     inlite_hub_id: inlite_hub_main
+    line: 0
+    name: In-lite Line 0
+  - platform: inlite_hub
+    inlite_hub_id: inlite_hub_main
     line: 1
     name: In-lite Line 1
   - platform: inlite_hub
     inlite_hub_id: inlite_hub_main
     line: 2
     name: In-lite Line 2
-  - platform: inlite_hub
-    inlite_hub_id: inlite_hub_main
-    line: 3
-    name: In-lite Line 3
 ```
 
 ## 6) Validate
@@ -96,5 +96,13 @@ python3 tools/inlite_ble_harness.py \
   --timeout-ms 1200 \
   --retries 4 \
   --verbose \
-  line 1 on --brightness 180 --auto-discover --discover-seconds 12
+  line 0 on --brightness 180 --auto-discover --discover-seconds 12
+
+python3 tools/inlite_ble_harness.py \
+  --hub-id 0x163E \
+  --passphrase-hex YOUR_HEX \
+  --timeout-ms 1200 \
+  --retries 4 \
+  --verbose \
+  query --auto-discover --discover-seconds 12 --listen-seconds 6 --trigger-get-info
 ```
