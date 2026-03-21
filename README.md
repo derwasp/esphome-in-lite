@@ -1,0 +1,84 @@
+# ESPHome in-lite (Smart Hub-150 BLE)
+
+ESPHome external component for local BLE control of in-lite Smart Hub-150.
+
+Current scope (v1):
+- Line control (on/off + brightness)
+- BLE diagnostics (RSSI, connection state, last command status)
+- Runtime BLE autodiscovery on ESP32
+
+## Repository Layout
+
+- `components/inlite_hub/` -> external component
+- `examples/inlite_smart_hub_150_bridge.yaml` -> full bridge example
+- `tools/inlite_ble_harness.py` -> Python validator/debug harness
+- `docs/credentials.md` -> how to get required credentials (iPhone/macOS compatible)
+- `docs/protocol-spec.md` -> protocol notes from reverse engineering
+
+## Required Inputs
+
+You need only:
+- `hub_id` (mesh destination ID, for example `0x163E`)
+- `network_passphrase_hex` (garden passphrase as UTF-8 bytes in hex)
+
+Hub BLE MAC is optional when autodiscovery is enabled.
+
+## Quick Start
+
+1. Get `hub_id` and `network_passphrase_hex`:
+- Follow `docs/credentials.md`.
+
+2. Add external component to your ESPHome node:
+
+```yaml
+external_components:
+  - source:
+      type: git
+      url: https://github.com/derwasp/esphome-in-lite
+      ref: main
+    components: [inlite_hub]
+```
+
+3. Use the bridge example:
+- Start from `examples/inlite_smart_hub_150_bridge.yaml`.
+- Set secrets:
+  - `inlite_smart_hub_mesh_id`
+  - `inlite_smart_hub_passphrase_hex`
+
+4. Compile/flash:
+
+```bash
+esphome config your_node.yaml
+esphome compile your_node.yaml
+```
+
+## Harness Validation (optional but recommended)
+
+Install harness deps:
+
+```bash
+pip install -r requirements-harness.txt
+```
+
+Run selftest:
+
+```bash
+python3 tools/inlite_ble_harness.py selftest
+```
+
+End-to-end command (autodiscovery + send):
+
+```bash
+python3 tools/inlite_ble_harness.py \
+  --hub-id 0x163E \
+  --passphrase-hex YOUR_HEX \
+  --timeout-ms 1200 \
+  --retries 4 \
+  --verbose \
+  line 1 on --brightness 180 --auto-discover --discover-seconds 12
+```
+
+## Notes
+
+- `4104` brightness payload is inferred and validated in practical use, but not officially documented by vendor.
+- Do not commit real credentials/secrets to git.

@@ -1,0 +1,51 @@
+# inlite_hub ESPHome External Component
+
+External component for local BLE control of in-lite Smart Hub-150.
+
+## External Component Wiring
+
+```yaml
+external_components:
+  - source:
+      type: git
+      url: https://github.com/derwasp/esphome-in-lite
+      ref: main
+    components: [inlite_hub]
+
+esp32_ble_tracker:
+  id: inlite_ble_tracker_id
+
+ble_client:
+  # Placeholder MAC; inlite_hub autodiscovery selects actual hub target at runtime.
+  - id: inlite_ble_id
+    mac_address: "00:00:00:00:00:00"
+    auto_connect: false
+```
+
+## Public Interface
+
+```yaml
+inlite_hub:
+  - id: inlite_hub_main
+    ble_client_id: inlite_ble_id
+    esp32_ble_id: inlite_ble_tracker_id
+    hub_id: 0x1234
+    network_passphrase_hex: "c3ce..."   # required, UTF-8 passphrase bytes as hex
+    auto_discover: true
+    discover_name_filter: "inlite"
+    # discover_match_address: AA:BB:CC:DD:EE:FF
+    command_timeout: 600ms
+    retries: 2
+    poll_interval: 15s
+```
+
+Child platforms:
+- `light` platform `inlite_hub` with `line`
+- `sensor` platform `inlite_hub` with `rssi` and `last_command_status`
+- `binary_sensor` platform `inlite_hub` with `connected`
+
+## Notes
+
+- `network_passphrase_hex` is required and must contain the active garden passphrase bytes in hex.
+- Autodiscovery selects candidates by preferred address (`discover_match_address`) and/or mesh service/name hits.
+- In autodiscovery mode, user-specific runtime inputs are only `hub_id` and `network_passphrase_hex`.

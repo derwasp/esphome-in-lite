@@ -1,0 +1,110 @@
+substitutions:
+  device_name: inlite_smart_hub_150_bridge
+  friendly_name: in-lite Smart Hub-150 Bridge
+
+esphome:
+  name: ${device_name}
+  friendly_name: ${friendly_name}
+  comment: Local BLE bridge for in-lite Smart Hub-150 (FW 52) using inlite_hub external component.
+  project:
+    name: local.inlite_smart_hub_150_bridge
+    version: "0.1.0"
+
+esp32:
+  board: esp32dev
+  framework:
+    type: esp-idf
+
+logger:
+  level: INFO
+  logs:
+    inlite_hub: INFO
+    esp32_ble_client: INFO
+
+api:
+  encryption:
+    key: !secret inlite_bridge_api_encryption_key
+
+ota:
+  - platform: esphome
+    password: !secret inlite_bridge_ota_password
+
+wifi:
+  ssid: !secret inlite_bridge_wifi_ssid
+  password: !secret inlite_bridge_wifi_password
+  ap:
+    ssid: ${device_name} Fallback
+    password: CHANGE_ME_12345
+
+captive_portal:
+
+external_components:
+  - source:
+      type: git
+      url: https://github.com/derwasp/esphome-in-lite
+      ref: main
+    components: [inlite_hub]
+
+esp32_ble:
+  max_connections: 1
+
+esp32_ble_tracker:
+  id: inlite_ble_tracker_id
+  scan_parameters:
+    interval: 1100ms
+    window: 1100ms
+    active: false
+
+ble_client:
+  # Placeholder address; actual target is selected by inlite_hub autodiscovery.
+  - mac_address: "00:00:00:00:00:00"
+    id: inlite_ble_id
+    auto_connect: false
+
+inlite_hub:
+  - id: inlite_hub_main
+    ble_client_id: inlite_ble_id
+    esp32_ble_id: inlite_ble_tracker_id
+    hub_id: !secret inlite_smart_hub_mesh_id
+    network_passphrase_hex: !secret inlite_smart_hub_passphrase_hex
+    auto_discover: true
+    discover_name_filter: inlite
+    command_timeout: 600ms
+    retries: 2
+    poll_interval: 15s
+
+light:
+  - platform: inlite_hub
+    inlite_hub_id: inlite_hub_main
+    line: 1
+    name: In-lite Line 1
+  - platform: inlite_hub
+    inlite_hub_id: inlite_hub_main
+    line: 2
+    name: In-lite Line 2
+  - platform: inlite_hub
+    inlite_hub_id: inlite_hub_main
+    line: 3
+    name: In-lite Line 3
+
+sensor:
+  - platform: inlite_hub
+    inlite_hub_id: inlite_hub_main
+    rssi:
+      name: In-lite BLE RSSI
+      entity_category: diagnostic
+    last_command_status:
+      name: In-lite Last Command Status
+      entity_category: diagnostic
+
+binary_sensor:
+  - platform: inlite_hub
+    inlite_hub_id: inlite_hub_main
+    connected:
+      name: In-lite BLE Connected
+      entity_category: diagnostic
+
+button:
+  - platform: restart
+    name: In-lite Bridge Restart
+    entity_category: diagnostic
