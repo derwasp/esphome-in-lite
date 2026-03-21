@@ -14,6 +14,7 @@ Current scope (v1):
 - `components/inlite_hub/` -> external component
 - `examples/inlite_smart_hub_150_bridge.yaml` -> full bridge example
 - `tools/inlite_ble_harness.py` -> Python validator/debug harness
+- `tools/inlite_config_wizard.py` -> interactive login + garden selection + YAML generator
 - `docs/credentials.md` -> how to get required credentials (iPhone/macOS compatible)
 - `docs/protocol-spec.md` -> protocol notes from reverse engineering
 
@@ -29,6 +30,12 @@ Hub BLE MAC is optional when autodiscovery is enabled.
 
 1. Get `hub_id` and `network_passphrase_hex`:
 - Follow `docs/credentials.md`.
+
+Or run the interactive wizard:
+
+```bash
+python3 tools/inlite_config_wizard.py
+```
 
 2. Add external component to your ESPHome node:
 
@@ -85,6 +92,12 @@ python3 tools/inlite_ble_harness.py \
   --retries 4 \
   --verbose \
   line 1 on --brightness 180 --auto-discover --discover-seconds 12
+```
+
+5. Test/setup wizard flow:
+
+```bash
+python3 tools/inlite_config_wizard.py --help
 ```
 
 ## Notes
