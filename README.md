@@ -2,7 +2,7 @@
 
 ESPHome external component for local BLE control of in-lite Smart Hub-150.
 
-> Work in progress: this integration is functional but still under active reverse-engineering and hardening.
+> Work in progress (WIP): this integration is not tested yet and is still under active reverse-engineering.
 
 Current scope (v1):
 - Line control (on/off + brightness)
