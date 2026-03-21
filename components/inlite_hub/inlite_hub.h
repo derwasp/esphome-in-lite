@@ -61,12 +61,11 @@ class InliteHub : public ble_client::BLEClientNode,
   }
 
   void register_line_light(InliteLineLight *line_light);
-  void queue_line_command(uint8_t line_id, bool on, uint8_t brightness);
+  void queue_line_command(uint8_t line_id, bool on);
 
  protected:
   static constexpr uint8_t kCmdTypeRequest = 0x01;
   static constexpr uint16_t kOpcodeSetOutletMode = 4103;
-  static constexpr uint16_t kOpcodeSetOutletBrightness = 4104;
   static constexpr uint8_t kPktTypeStartFlush = 112;
   static constexpr uint8_t kPktTypeData = 113;
   static constexpr uint8_t kPktTypeAck = 114;
@@ -203,7 +202,6 @@ class InliteLineLight : public light::LightOutput, public Component {
   InliteHub *parent_{nullptr};
   light::LightState *state_{nullptr};
   uint8_t line_{0};
-  uint8_t last_brightness_{255};
   uint8_t last_output_mode_{0};
   uint8_t last_output_state_{0};
   uint8_t last_output_rtc_timer_{0};

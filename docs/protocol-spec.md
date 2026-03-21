@@ -5,7 +5,7 @@
 - Device target: `in-lite Smart Hub-150`
 - Firmware target: `52`
 - App artifact used for static reverse engineering: mirror package `nl.coffeeit.inliteapp` version `3.18.0` (`versionCode 452`)
-- This spec captures protocol behavior required for line control (on/off + brightness) and BLE diagnostics.
+- This spec captures protocol behavior required for line on/off control and BLE diagnostics.
 
 ## APK Trust Gate (Mirror First)
 
@@ -146,14 +146,6 @@ Observed on/off use:
 - ON: `mode_byte = 0x01`, `mode_mask = 0x01`
 - OFF: `mode_byte = 0x00`, `mode_mask = 0x01`
 
-### 4104: Set Outlet Brightness
-
-Opcode constant `4104` exists in app constants.
-
-- Runtime send path was not clearly referenced in current app flow.
-- Current bridge/harness uses inferred payload `[line_id, brightness_0_255]`.
-- This field mapping must be confirmed on hardware and adjusted if needed.
-
 ## Validation Vectors
 
 Captured and used in harness selftest:
@@ -167,9 +159,7 @@ These vectors are implemented in `tools/inlite_ble_harness.py` (`selftest` comma
 
 ## Known Unknowns
 
-- Brightness opcode `4104` payload semantics beyond inferred `[line, value]`
 - Scene/routine opcodes beyond line mode control in v1
-- Potential hub-side constraints for high-frequency slider updates
 
 ## v1 Interop Contract (ESPHome External Component)
 
@@ -188,7 +178,7 @@ These vectors are implemented in `tools/inlite_ble_harness.py` (`selftest` comma
 
 Entities exposed in v1:
 
-- line lights (brightness-capable)
+- line lights (on/off)
 - BLE diagnostics:
   - RSSI sensor
   - connection-state binary sensor
