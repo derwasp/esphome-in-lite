@@ -37,6 +37,7 @@ inlite_hub:
     command_timeout: 600ms
     retries: 2
     poll_interval: 15s
+    state_refresh_interval: 5min
 ```
 
 Child platforms:
@@ -50,4 +51,5 @@ Child platforms:
 - Autodiscovery selects candidates by preferred address (`discover_match_address`) and/or mesh service/name hits.
 - In autodiscovery mode, user-specific runtime inputs are only `hub_id` and `network_passphrase_hex`.
 - Line entities are updated from hub OOB line-mode packets (opcodes `24` and `33`).
-- On connect, and then every `poll_interval` until the first line-state update is seen, the component queues a state-sync request (`GET_INFO_DEVICES`, opcode `5`).
+- On connect, and then every `poll_interval` until the first all-lines snapshot is seen, the component queues a state-sync request (`GET_INFO_DEVICES`, opcode `5`).
+- After the first snapshot, periodic refresh requests continue every `state_refresh_interval` (default `5min`) for drift recovery.

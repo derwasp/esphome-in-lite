@@ -117,9 +117,6 @@ void InliteHub::queue_state_sync_request_(bool force) {
   if (this->node_state != espbt::ClientState::ESTABLISHED || !this->characteristics_ready_) {
     return;
   }
-  if (!force && this->has_received_state_snapshot_) {
-    return;
-  }
 
   std::vector<uint8_t> get_info_cmd = {
       kCmdTypeRequest,
@@ -142,7 +139,9 @@ void InliteHub::queue_state_sync_request_(bool force) {
 
   uint32_t now = millis();
   if (!force) {
-    uint32_t min_gap_ms = std::max<uint32_t>(this->get_update_interval(), 1000);
+    uint32_t min_gap_ms = this->has_bootstrap_snapshot_
+                              ? std::max<uint32_t>(this->state_refresh_interval_ms_, 1000)
+                              : std::max<uint32_t>(this->get_update_interval(), 1000);
     if (now - this->last_state_sync_request_ms_ < min_gap_ms) {
       return;
     }
@@ -332,6 +331,7 @@ void InliteHub::reset_ble_state_() {
   this->incoming_packet_buffer_.clear();
   this->active_stream_ = {};
   this->has_received_state_snapshot_ = false;
+  this->has_bootstrap_snapshot_ = false;
   this->last_state_sync_request_ms_ = 0;
 }
 
@@ -567,6 +567,7 @@ void InliteHub::handle_block_data_(const std::vector<uint8_t> &payload) {
     }
     uint8_t output_rtc_timer = payload.size() >= 7 ? payload[6] : 0;
     this->apply_line_mode_update_(payload[3], payload[4], payload[5], output_rtc_timer);
+    this->has_received_state_snapshot_ = true;
     return;
   }
 
@@ -592,6 +593,7 @@ void InliteHub::handle_block_data_(const std::vector<uint8_t> &payload) {
   }
   if (line_chunks > 0) {
     this->has_received_state_snapshot_ = true;
+    this->has_bootstrap_snapshot_ = true;
   }
 }
 

@@ -51,6 +51,9 @@ class InliteHub : public ble_client::BLEClientNode,
     this->command_timeout_ms_ = command_timeout_ms;
   }
   void set_retries(uint8_t retries) { this->retries_ = retries; }
+  void set_state_refresh_interval(uint32_t state_refresh_interval_ms) {
+    this->state_refresh_interval_ms_ = state_refresh_interval_ms;
+  }
 
   void set_rssi_sensor(sensor::Sensor *sensor) { this->rssi_sensor_ = sensor; }
   void set_last_command_status_sensor(sensor::Sensor *sensor) {
@@ -165,6 +168,7 @@ class InliteHub : public ble_client::BLEClientNode,
 
   uint32_t command_timeout_ms_{600};
   uint8_t retries_{2};
+  uint32_t state_refresh_interval_ms_{300000};
 
   bool characteristics_ready_{false};
   bool continuation_notify_registered_{false};
@@ -183,6 +187,7 @@ class InliteHub : public ble_client::BLEClientNode,
   std::deque<QueuedMeshPayload> queue_;
   StreamState active_stream_;
   bool has_received_state_snapshot_{false};
+  bool has_bootstrap_snapshot_{false};
   uint32_t last_state_sync_request_ms_{0};
 
   std::vector<InliteLineLight *> line_lights_;

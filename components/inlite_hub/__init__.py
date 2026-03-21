@@ -12,6 +12,7 @@ CONF_HUB_ID = "hub_id"
 CONF_COMMAND_TIMEOUT = "command_timeout"
 CONF_RETRIES = "retries"
 CONF_POLL_INTERVAL = "poll_interval"
+CONF_STATE_REFRESH_INTERVAL = "state_refresh_interval"
 CONF_NETWORK_PASSPHRASE_HEX = "network_passphrase_hex"
 CONF_AUTO_DISCOVER = "auto_discover"
 CONF_DISCOVER_NAME_FILTER = "discover_name_filter"
@@ -56,6 +57,9 @@ CONFIG_SCHEMA = (
             cv.Optional(
                 CONF_POLL_INTERVAL, default="15s"
             ): cv.positive_time_period_milliseconds,
+            cv.Optional(
+                CONF_STATE_REFRESH_INTERVAL, default="5min"
+            ): cv.positive_time_period_milliseconds,
         }
     )
     .extend(cv.COMPONENT_SCHEMA)
@@ -77,3 +81,4 @@ async def to_code(config):
     cg.add(var.set_command_timeout(config[CONF_COMMAND_TIMEOUT]))
     cg.add(var.set_retries(config[CONF_RETRIES]))
     cg.add(var.set_update_interval(config[CONF_POLL_INTERVAL]))
+    cg.add(var.set_state_refresh_interval(config[CONF_STATE_REFRESH_INTERVAL]))
