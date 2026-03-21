@@ -49,3 +49,4 @@ Child platforms:
 - `network_passphrase_hex` is required and must contain the active garden passphrase bytes in hex.
 - Autodiscovery selects candidates by preferred address (`discover_match_address`) and/or mesh service/name hits.
 - In autodiscovery mode, user-specific runtime inputs are only `hub_id` and `network_passphrase_hex`.
+- Line entities are updated from hub OOB line-mode packets (opcodes `24` and `33`).

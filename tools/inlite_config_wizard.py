@@ -188,6 +188,7 @@ def verify_connectivity(
     diag_dir: Path,
     hub_id_hex: str,
     passphrase_hex: str,
+    lines: list[int],
 ) -> None:
     harness_path = Path(__file__).resolve().parent / "inlite_ble_harness.py"
     if not harness_path.exists():
@@ -247,8 +248,10 @@ def verify_connectivity(
         "--verbose",
     ]
 
-    print("Step 2/3: Turn lines 1, 2, 3 ON at 100% brightness.")
-    for line in (1, 2, 3):
+    line_list = ", ".join(str(x) for x in lines)
+
+    print(f"Step 2/3: Turn lines {line_list} ON at 100% brightness.")
+    for line in lines:
         print(f"  - Sending ON command to line {line}")
         on_cmd = common + ["line", str(line), "on", "--brightness", "255"]
         rc, _, _ = run_logged_command(
@@ -261,8 +264,8 @@ def verify_connectivity(
                 f"See {verify_dir / f'02_line_{line}_on.log'}"
             )
 
-    print("Step 3/3: Turn lines 1, 2, 3 OFF.")
-    for line in (1, 2, 3):
+    print(f"Step 3/3: Turn lines {line_list} OFF.")
+    for line in lines:
         print(f"  - Sending OFF command to line {line}")
         off_cmd = common + ["line", str(line), "off"]
         rc, _, _ = run_logged_command(
@@ -313,8 +316,8 @@ def parse_lines(value: str) -> list[int]:
         if not p.isdigit():
             fail(f"invalid line value '{p}', expected integers")
         v = int(p, 10)
-        if v < 1 or v > 16:
-            fail(f"line {v} out of range (expected 1..16)")
+        if v < 0 or v > 15:
+            fail(f"line {v} out of range (expected 0..15)")
         if v not in out:
             out.append(v)
     return out
@@ -476,8 +479,8 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--lines",
-        default="1,2,3",
-        help="comma-separated line numbers to generate (default: 1,2,3)",
+        default="0,1,2",
+        help="comma-separated line numbers to generate (default: 0,1,2)",
     )
     parser.add_argument(
         "--output",
@@ -712,8 +715,9 @@ def main() -> int:
     print(f"  lines={','.join(str(x) for x in lines)}")
 
     print("\nVerification option:")
+    verify_line_text = ",".join(str(x) for x in lines)
     do_verify = prompt_yes_no(
-        "Verify connectivity now (discover hub, turn lines 1-3 ON, then OFF)?",
+        f"Verify connectivity now (discover hub, turn lines {verify_line_text} ON, then OFF)?",
         default=False,
     )
     if do_verify:
@@ -721,6 +725,7 @@ def main() -> int:
             diag_dir=diag_dir,
             hub_id_hex=selected["hub_id_hex"],
             passphrase_hex=selected["passphrase_hex"],
+            lines=lines,
         )
     else:
         print("Connectivity verification skipped.")

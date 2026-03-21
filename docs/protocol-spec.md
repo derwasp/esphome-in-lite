@@ -116,6 +116,19 @@ Command payload for stream data is mesh command bytes:
 - `opcode` (2 bytes, little-endian)
 - `opcode payload` (variable)
 
+## Block Data / State Updates (packet_type 115)
+
+Hub state updates arrive as packet type `115` payloads.
+
+Observed line-mode OOB formats:
+
+- OOB single-line mode update (`cmd_type=0x03`, opcode `24`):
+  - payload: `[0x03, 0x18, 0x00, line_id, output_mode, output_state, output_rtc_timer?]`
+- OOB all-lines mode update (`cmd_type=0x03`, opcode `33`):
+  - payload: `[0x03, 0x21, 0x00] + N * [line_id, output_mode, output_state, output_rtc_timer]`
+
+`output_mode` bit `0` is the line on/off flag (`1=on`, `0=off`), matching app-side `OutputMode.isOn()`.
+
 ## Line Control Opcodes
 
 ### 4103: Set Outlet/Line Mode

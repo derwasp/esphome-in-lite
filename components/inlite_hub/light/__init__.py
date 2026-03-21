@@ -18,7 +18,7 @@ CONFIG_SCHEMA = cv.All(
         {
             cv.GenerateID(CONF_OUTPUT_ID): cv.declare_id(InliteLineLight),
             cv.GenerateID(CONF_INLITE_HUB_ID): cv.use_id(InliteHub),
-            cv.Required(CONF_LINE): cv.int_range(min=1, max=16),
+            cv.Required(CONF_LINE): cv.int_range(min=0, max=15),
         }
     ).extend(cv.COMPONENT_SCHEMA)
 )

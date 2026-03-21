@@ -33,6 +33,8 @@ static const espbt::ESPBTUUID kContinuationWriteUuid =
 static const espbt::ESPBTUUID kCompleteWriteUuid =
     espbt::ESPBTUUID::from_raw("c4edc000-9daf-11e3-8004-10025b000b00");
 
+static inline bool output_mode_is_on(uint8_t output_mode) { return (output_mode & 0x01) != 0; }
+
 void InliteHub::setup() {
   // Mirror the app defaults: random controller id in [32768..65533] and random 24-bit sequence.
   this->controller_id_ = static_cast<uint16_t>(32768 + (esp_random() % (65533 - 32768 + 1)));
@@ -478,14 +480,79 @@ bool InliteHub::send_encrypted_packet_(const std::vector<uint8_t> &encrypted_pac
 }
 
 void InliteHub::handle_mesh_packet_(const MeshPacket &packet) {
-  if (packet.packet_type != kPktTypeAck || packet.source_id != this->hub_id_ ||
-      packet.payload.size() < 2) {
+  if (packet.source_id != this->hub_id_) {
     return;
   }
 
-  uint16_t ack_offset = static_cast<uint16_t>(packet.payload[0] | (packet.payload[1] << 8));
-  bool end_ack = packet.payload.size() >= 3 && packet.payload[2] == kEndAckMagic;
-  this->handle_stream_ack_(ack_offset, end_ack);
+  if (packet.packet_type == kPktTypeAck) {
+    if (packet.payload.size() < 2) {
+      return;
+    }
+    uint16_t ack_offset = static_cast<uint16_t>(packet.payload[0] | (packet.payload[1] << 8));
+    bool end_ack = packet.payload.size() >= 3 && packet.payload[2] == kEndAckMagic;
+    this->handle_stream_ack_(ack_offset, end_ack);
+    return;
+  }
+
+  if (packet.packet_type == kPktTypeBlockData) {
+    this->handle_block_data_(packet.payload);
+  }
+}
+
+void InliteHub::handle_block_data_(const std::vector<uint8_t> &payload) {
+  if (payload.size() < 3) {
+    return;
+  }
+
+  uint8_t cmd_type = payload[0];
+  uint16_t opcode = static_cast<uint16_t>(payload[1] | (payload[2] << 8));
+  if (cmd_type != kCmdTypeOob) {
+    return;
+  }
+
+  if (opcode == kOpcodeOobOutletModeUpdate) {
+    if (payload.size() < 6) {
+      ESP_LOGW(TAG, "OOB single-line update too short (%u bytes)",
+               static_cast<unsigned int>(payload.size()));
+      return;
+    }
+    uint8_t output_rtc_timer = payload.size() >= 7 ? payload[6] : 0;
+    this->apply_line_mode_update_(payload[3], payload[4], payload[5], output_rtc_timer);
+    return;
+  }
+
+  if (opcode != kOpcodeOobAllOutletsModeUpdate) {
+    return;
+  }
+
+  if (payload.size() < 7) {
+    return;
+  }
+
+  size_t body_len = payload.size() - 3;
+  size_t line_chunks = body_len / 4;
+  size_t trailing = body_len % 4;
+  if (trailing != 0) {
+    ESP_LOGW(TAG, "OOB all-lines payload has %u trailing byte(s)", static_cast<unsigned int>(trailing));
+  }
+
+  for (size_t i = 0; i < line_chunks; i++) {
+    size_t base = 3 + (i * 4);
+    this->apply_line_mode_update_(payload[base], payload[base + 1], payload[base + 2],
+                                  payload[base + 3]);
+  }
+}
+
+void InliteHub::apply_line_mode_update_(uint8_t line_id, uint8_t output_mode, uint8_t output_state,
+                                        uint8_t output_rtc_timer) {
+  ESP_LOGD(TAG, "line %u update mode=0x%02x state=0x%02x rtc=%u", line_id, output_mode, output_state,
+           output_rtc_timer);
+  for (auto *line_light : this->line_lights_) {
+    if (line_light == nullptr || line_light->get_line() != line_id) {
+      continue;
+    }
+    line_light->apply_remote_mode(output_mode, output_state, output_rtc_timer);
+  }
 }
 
 void InliteHub::handle_stream_ack_(uint16_t ack_offset, bool end_ack) {
@@ -846,17 +913,52 @@ light::LightTraits InliteLineLight::get_traits() {
 }
 
 void InliteLineLight::write_state(light::LightState *state) {
+  this->state_ = state;
+
   bool on = state->current_values.is_on();
   float brightness = std::clamp(state->current_values.get_brightness(), 0.0f, 1.0f);
   uint8_t raw_brightness = static_cast<uint8_t>(std::round(brightness * 255.0f));
 
+  if (on && raw_brightness > 0) {
+    this->last_brightness_ = raw_brightness;
+  }
+
   if (!on) {
     raw_brightness = 0;
+  } else if (raw_brightness == 0) {
+    raw_brightness = this->last_brightness_ > 0 ? this->last_brightness_ : 255;
   }
 
   if (this->parent_ != nullptr) {
     this->parent_->queue_line_command(this->line_, on, raw_brightness);
   }
+}
+
+void InliteLineLight::apply_remote_mode(uint8_t output_mode, uint8_t output_state,
+                                        uint8_t output_rtc_timer) {
+  this->last_output_mode_ = output_mode;
+  this->last_output_state_ = output_state;
+  this->last_output_rtc_timer_ = output_rtc_timer;
+
+  bool on = output_mode_is_on(output_mode);
+  if (!on) {
+    this->last_brightness_ = 0;
+  } else if (this->last_brightness_ == 0) {
+    this->last_brightness_ = 255;
+  }
+
+  if (this->state_ == nullptr) {
+    return;
+  }
+
+  float brightness = on ? static_cast<float>(this->last_brightness_) / 255.0f : 0.0f;
+  light::LightColorValues values = this->state_->remote_values;
+  values.set_color_mode(light::ColorMode::BRIGHTNESS);
+  values.set_state(on);
+  values.set_brightness(brightness);
+  this->state_->remote_values = values;
+  this->state_->current_values = values;
+  this->state_->publish_state();
 }
 
 }  // namespace inlite_hub
