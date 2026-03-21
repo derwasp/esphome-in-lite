@@ -1,5 +1,11 @@
 # Quickstart
 
+## 0) Optional: generate a full YAML automatically
+
+```bash
+python3 tools/inlite_config_wizard.py
+```
+
 ## 1) Add external component
 
 ```yaml

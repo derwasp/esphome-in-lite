@@ -6,6 +6,23 @@ This component needs two values:
 
 You can retrieve both from in-lite API login response.
 
+## Fast path (recommended): interactive wizard
+
+```bash
+python3 tools/inlite_config_wizard.py
+```
+
+What it does:
+- asks for email
+- requests login code (`/v2/users/authorize`)
+- asks for the one-time code
+- logs in (`/user/login`)
+- shows all returned gardens and lets you select one if multiple are returned
+- prints selected `hub_id` + `passphrase_hex`
+- generates a full ESPHome YAML file
+
+---
+
 ## 1) Request login code
 
 ```bash
