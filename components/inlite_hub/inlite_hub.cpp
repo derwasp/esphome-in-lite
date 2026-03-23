@@ -50,7 +50,7 @@ void InliteHub::setup() {
   if (this->parent() != nullptr && this->auto_discover_) {
     this->selected_discovery_address_ = this->parent()->get_address();
   }
-  this->reset_ble_state_();
+  this->reset_ble_state_(true);
 
   esp_err_t mtu_status = esp_ble_gatt_set_local_mtu(81);
   if (mtu_status != ESP_OK) {
@@ -254,12 +254,12 @@ void InliteHub::gattc_event_handler(esp_gattc_cb_event_t event, esp_gatt_if_t ga
 
     case ESP_GATTC_CLOSE_EVT:
       ESP_LOGW(TAG, "Disconnected from %s", this->parent()->address_str());
-      this->reset_ble_state_();
+      this->reset_ble_state_(true);
       this->publish_connected_state_();
       break;
 
     case ESP_GATTC_SEARCH_CMPL_EVT:
-      this->reset_ble_state_();
+      this->reset_ble_state_(false);
       if (this->configure_characteristics_()) {
         ESP_LOGI(TAG, "Mesh service discovered; registering notifications");
       }
@@ -325,7 +325,7 @@ void InliteHub::gap_event_handler(esp_gap_ble_cb_event_t event,
   }
 }
 
-void InliteHub::reset_ble_state_() {
+void InliteHub::reset_ble_state_(bool clear_pending) {
   this->characteristics_ready_ = false;
   this->continuation_notify_registered_ = false;
   this->complete_notify_registered_ = false;
@@ -340,6 +340,11 @@ void InliteHub::reset_ble_state_() {
   this->has_received_state_snapshot_ = false;
   this->has_bootstrap_snapshot_ = false;
   this->last_state_sync_request_ms_ = 0;
+  if (clear_pending) {
+    for (auto &pending : this->pending_line_states_) {
+      pending = {};
+    }
+  }
 }
 
 bool InliteHub::configure_characteristics_() {

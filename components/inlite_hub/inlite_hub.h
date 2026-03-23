@@ -130,7 +130,7 @@ class InliteHub : public ble_client::BLEClientNode,
     std::vector<uint8_t> payload;
   };
 
-  void reset_ble_state_();
+  void reset_ble_state_(bool clear_pending);
   bool configure_characteristics_();
   void process_active_stream_();
   bool retry_or_fail_();
