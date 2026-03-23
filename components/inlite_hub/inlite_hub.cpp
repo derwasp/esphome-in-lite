@@ -115,8 +115,8 @@ void InliteHub::queue_line_command(uint8_t line_id, bool on) {
       static_cast<uint8_t>(on ? 0x01 : 0x00),
       0x01,
   };
-  this->queue_.push_back({mode_cmd, true, line_id, on});
-  this->mark_line_pending_(line_id, on);
+  uint32_t pending_token = this->mark_line_pending_(line_id, on);
+  this->queue_.push_back({mode_cmd, true, line_id, on, pending_token});
 }
 
 void InliteHub::queue_state_sync_request_(bool force) {
@@ -407,6 +407,7 @@ void InliteHub::process_active_stream_() {
     this->active_stream_.is_line_command = queued.is_line_command;
     this->active_stream_.line_id = queued.line_id;
     this->active_stream_.desired_on = queued.desired_on;
+    this->active_stream_.pending_token = queued.pending_token;
   }
 
   switch (this->active_stream_.stage) {
@@ -695,7 +696,12 @@ void InliteHub::finish_active_stream_(int status_code) {
     return;
   }
   if (status_code != 0) {
-    this->clear_line_pending_(completed.line_id);
+    if (completed.line_id < this->pending_line_states_.size()) {
+      auto &pending = this->pending_line_states_[completed.line_id];
+      if (pending.active && pending.token == completed.pending_token) {
+        this->clear_line_pending_(completed.line_id);
+      }
+    }
   }
   this->queue_state_sync_request_(true);
 }
@@ -991,14 +997,21 @@ uint32_t InliteHub::pending_line_timeout_ms_() const {
   return std::max<uint32_t>(request_budget_ms + 500, 1500);
 }
 
-void InliteHub::mark_line_pending_(uint8_t line_id, bool desired_on) {
+uint32_t InliteHub::mark_line_pending_(uint8_t line_id, bool desired_on) {
   if (line_id >= this->pending_line_states_.size()) {
-    return;
+    return 0;
   }
+  this->next_pending_token_++;
+  if (this->next_pending_token_ == 0) {
+    this->next_pending_token_ = 1;
+  }
+
   auto &pending = this->pending_line_states_[line_id];
   pending.active = true;
   pending.desired_on = desired_on;
   pending.started_ms = millis();
+  pending.token = this->next_pending_token_;
+  return pending.token;
 }
 
 void InliteHub::clear_line_pending_(uint8_t line_id) {
