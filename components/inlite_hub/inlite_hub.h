@@ -81,6 +81,12 @@ class InliteHub : public ble_client::BLEClientNode,
   static constexpr uint8_t kEndAckMagic = 0xEF;
   static constexpr size_t kMaxDataChunk = 62;
   static constexpr size_t kBleChunkSize = 78;
+  static constexpr uint8_t kLineBatchSize = 5;
+  static constexpr uint8_t kLineBatchAcknowledgedLimit = 10;
+  static constexpr uint32_t kLineBatchDelayMs = 200;
+  static constexpr uint32_t kLineRetryDelayMs = 500;
+  static constexpr uint32_t kLineRetryAcknowledgeDelayMs = 3000;
+  static constexpr uint32_t kLineBatchTimeoutMs = 30000;
 
   enum class StreamStage {
     IDLE,
@@ -189,6 +195,10 @@ class InliteHub : public ble_client::BLEClientNode,
   uint32_t command_timeout_ms_{600};
   uint8_t retries_{2};
   uint32_t state_refresh_interval_ms_{300000};
+  uint32_t line_batch_started_ms_{0};
+  uint32_t line_command_ready_ms_{0};
+  uint32_t last_line_command_completed_ms_{0};
+  uint8_t line_batch_sent_count_{0};
 
   bool characteristics_ready_{false};
   bool continuation_notify_registered_{false};

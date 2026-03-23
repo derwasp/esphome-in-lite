@@ -77,6 +77,10 @@ void InliteHub::dump_config() {
   }
   ESP_LOGCONFIG(TAG, "  Command timeout: %ums", this->command_timeout_ms_);
   ESP_LOGCONFIG(TAG, "  Retries: %u", this->retries_);
+  ESP_LOGCONFIG(TAG,
+                "  Line batch parity: size=%u delay=%ums retry_delay=%ums ack_wait=%ums timeout=%ums",
+                kLineBatchSize, kLineBatchDelayMs, kLineRetryDelayMs, kLineRetryAcknowledgeDelayMs,
+                kLineBatchTimeoutMs);
   ESP_LOGCONFIG(TAG, "  Connected: %s", this->last_connected_state_ ? "yes" : "no");
 
   if (this->hub_id_ == 0) {
@@ -340,6 +344,10 @@ void InliteHub::reset_ble_state_(bool clear_pending) {
   this->has_received_state_snapshot_ = false;
   this->has_bootstrap_snapshot_ = false;
   this->last_state_sync_request_ms_ = 0;
+  this->line_batch_started_ms_ = 0;
+  this->line_command_ready_ms_ = 0;
+  this->last_line_command_completed_ms_ = 0;
+  this->line_batch_sent_count_ = 0;
   if (clear_pending) {
     for (auto &pending : this->pending_line_states_) {
       pending = {};
@@ -395,6 +403,34 @@ void InliteHub::process_active_stream_() {
   if (!this->active_stream_.active) {
     if (this->queue_.empty()) {
       return;
+    }
+
+    uint32_t now = millis();
+    const auto &next = this->queue_.front();
+    if (next.is_line_command) {
+      if (this->line_batch_started_ms_ == 0 ||
+          now - this->line_batch_started_ms_ > kLineBatchTimeoutMs ||
+          this->line_batch_sent_count_ >= kLineBatchAcknowledgedLimit) {
+        this->line_batch_started_ms_ = now;
+        this->line_batch_sent_count_ = 0;
+      }
+
+      if (now < this->line_command_ready_ms_) {
+        return;
+      }
+
+      if (this->line_batch_sent_count_ > 0 &&
+          now - this->last_line_command_completed_ms_ < kLineBatchDelayMs) {
+        return;
+      }
+
+      if (this->line_batch_sent_count_ >= kLineBatchSize) {
+        this->line_batch_started_ms_ = now;
+        this->line_batch_sent_count_ = 0;
+      }
+    } else {
+      this->line_batch_started_ms_ = 0;
+      this->line_batch_sent_count_ = 0;
     }
 
     QueuedMeshPayload queued = std::move(this->queue_.front());
@@ -724,6 +760,25 @@ void InliteHub::finish_active_stream_(int status_code) {
   if (!completed.is_line_command) {
     return;
   }
+  uint32_t now = millis();
+  this->last_line_command_completed_ms_ = now;
+
+  if (status_code == 0) {
+    this->line_command_ready_ms_ = now + kLineBatchDelayMs;
+    if (this->line_batch_started_ms_ == 0 ||
+        now - this->line_batch_started_ms_ > kLineBatchTimeoutMs) {
+      this->line_batch_started_ms_ = now;
+      this->line_batch_sent_count_ = 0;
+    }
+    if (this->line_batch_sent_count_ < kLineBatchAcknowledgedLimit) {
+      this->line_batch_sent_count_++;
+    }
+  } else {
+    this->line_command_ready_ms_ = now + kLineRetryDelayMs;
+    this->line_batch_started_ms_ = now;
+    this->line_batch_sent_count_ = 0;
+  }
+
   if (status_code != 0) {
     if (completed.line_id < this->pending_line_states_.size()) {
       auto &pending = this->pending_line_states_[completed.line_id];
@@ -1025,7 +1080,8 @@ uint32_t InliteHub::pending_line_timeout_ms_() const {
   // A line command traverses START -> DATA -> END ACK phases; each phase can consume
   // the full retry budget before we consider the command failed.
   uint32_t stream_budget_ms = this->command_timeout_ms_ * retries * 3;
-  return std::max<uint32_t>(stream_budget_ms + 5000, 6000);
+  uint32_t acknowledge_window_ms = kLineRetryAcknowledgeDelayMs + 2000;
+  return std::max<uint32_t>(stream_budget_ms + acknowledge_window_ms, 6000);
 }
 
 uint32_t InliteHub::mark_line_pending_(uint8_t line_id, bool desired_on) {
