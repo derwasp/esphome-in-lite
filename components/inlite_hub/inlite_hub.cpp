@@ -340,9 +340,6 @@ void InliteHub::reset_ble_state_() {
   this->has_received_state_snapshot_ = false;
   this->has_bootstrap_snapshot_ = false;
   this->last_state_sync_request_ms_ = 0;
-  for (auto &pending : this->pending_line_states_) {
-    pending = {};
-  }
 }
 
 bool InliteHub::configure_characteristics_() {
@@ -993,8 +990,10 @@ void InliteHub::request_rssi_() {
 
 uint32_t InliteHub::pending_line_timeout_ms_() const {
   uint32_t retries = static_cast<uint32_t>(this->retries_) + 1;
-  uint32_t request_budget_ms = this->command_timeout_ms_ * retries;
-  return std::max<uint32_t>(request_budget_ms + 500, 1500);
+  // A line command traverses START -> DATA -> END ACK phases; each phase can consume
+  // the full retry budget before we consider the command failed.
+  uint32_t stream_budget_ms = this->command_timeout_ms_ * retries * 3;
+  return std::max<uint32_t>(stream_budget_ms + 500, 2000);
 }
 
 uint32_t InliteHub::mark_line_pending_(uint8_t line_id, bool desired_on) {
