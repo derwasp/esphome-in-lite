@@ -94,6 +94,10 @@ class InliteHub : public ble_client::BLEClientNode,
 
   struct QueuedMeshPayload {
     std::vector<uint8_t> payload;
+    bool is_line_command{false};
+    uint8_t line_id{0};
+    bool desired_on{false};
+    uint32_t pending_token{0};
   };
 
   struct StreamState {
@@ -104,6 +108,17 @@ class InliteHub : public ble_client::BLEClientNode,
     uint16_t expected_ack{0};
     uint8_t attempts{0};
     uint32_t stage_started_ms{0};
+    bool is_line_command{false};
+    uint8_t line_id{0};
+    bool desired_on{false};
+    uint32_t pending_token{0};
+  };
+
+  struct PendingLineState {
+    bool active{false};
+    bool desired_on{false};
+    uint32_t started_ms{0};
+    uint32_t token{0};
   };
 
   struct MeshPacket {
@@ -115,11 +130,17 @@ class InliteHub : public ble_client::BLEClientNode,
     std::vector<uint8_t> payload;
   };
 
-  void reset_ble_state_();
+  void reset_ble_state_(bool clear_pending);
   bool configure_characteristics_();
   void process_active_stream_();
   bool retry_or_fail_();
   void queue_state_sync_request_(bool force);
+  void expire_stale_pending_lines_();
+  uint32_t pending_line_timeout_ms_() const;
+  uint32_t mark_line_pending_(uint8_t line_id, bool desired_on);
+  void refresh_line_pending_started_ms_(uint8_t line_id, uint32_t pending_token);
+  void clear_line_pending_(uint8_t line_id);
+  bool get_pending_line_target_(uint8_t line_id, bool *desired_on);
 
   bool send_stream_packet_(uint8_t packet_type, const std::vector<uint8_t> &data);
   bool send_encrypted_packet_(const std::vector<uint8_t> &encrypted_packet);
@@ -185,6 +206,8 @@ class InliteHub : public ble_client::BLEClientNode,
   std::vector<uint8_t> incoming_packet_buffer_;
   std::deque<QueuedMeshPayload> queue_;
   StreamState active_stream_;
+  std::array<PendingLineState, 16> pending_line_states_{};
+  uint32_t next_pending_token_{0};
   bool has_received_state_snapshot_{false};
   bool has_bootstrap_snapshot_{false};
   uint32_t last_state_sync_request_ms_{0};

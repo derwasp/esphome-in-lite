@@ -51,5 +51,7 @@ Child platforms:
 - Autodiscovery selects candidates by preferred address (`discover_match_address`) and/or mesh service/name hits.
 - In autodiscovery mode, user-specific runtime inputs are only `hub_id` and `network_passphrase_hex`.
 - Line entities are updated from hub OOB line-mode packets (opcodes `24` and `33`).
+- Local line toggles are published optimistically, then reconciled from hub OOB updates.
+- During a short per-line pending window after a toggle, contradictory OOB updates are ignored to prevent HA toggle bounce.
 - On connect, and then every `poll_interval` until the first all-lines snapshot is seen, the component queues a state-sync request (`GET_INFO_DEVICES`, opcode `5`).
 - After the first snapshot, periodic refresh requests continue every `state_refresh_interval` (default `5min`) for drift recovery.

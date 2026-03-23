@@ -50,7 +50,7 @@ void InliteHub::setup() {
   if (this->parent() != nullptr && this->auto_discover_) {
     this->selected_discovery_address_ = this->parent()->get_address();
   }
-  this->reset_ble_state_();
+  this->reset_ble_state_(true);
 
   esp_err_t mtu_status = esp_ble_gatt_set_local_mtu(81);
   if (mtu_status != ESP_OK) {
@@ -89,6 +89,24 @@ void InliteHub::register_line_light(InliteLineLight *line_light) {
 }
 
 void InliteHub::queue_line_command(uint8_t line_id, bool on) {
+  if (line_id >= this->pending_line_states_.size()) {
+    ESP_LOGW(TAG, "Ignoring line command for out-of-range line_id=%u", line_id);
+    return;
+  }
+
+  size_t removed = 0;
+  for (auto it = this->queue_.begin(); it != this->queue_.end();) {
+    if (it->is_line_command && it->line_id == line_id) {
+      it = this->queue_.erase(it);
+      removed++;
+      continue;
+    }
+    ++it;
+  }
+  if (removed > 0) {
+    ESP_LOGD(TAG, "Coalesced %u queued command(s) for line %u", static_cast<unsigned>(removed), line_id);
+  }
+
   std::vector<uint8_t> mode_cmd = {
       kCmdTypeRequest,
       static_cast<uint8_t>(kOpcodeSetOutletMode & 0xFF),
@@ -97,7 +115,8 @@ void InliteHub::queue_line_command(uint8_t line_id, bool on) {
       static_cast<uint8_t>(on ? 0x01 : 0x00),
       0x01,
   };
-  this->queue_.push_back({mode_cmd});
+  uint32_t pending_token = this->mark_line_pending_(line_id, on);
+  this->queue_.push_back({mode_cmd, true, line_id, on, pending_token});
 }
 
 void InliteHub::queue_state_sync_request_(bool force) {
@@ -201,6 +220,8 @@ bool InliteHub::parse_device(const espbt::ESPBTDevice &device) {
 }
 
 void InliteHub::loop() {
+  this->expire_stale_pending_lines_();
+
   bool connected_now = this->node_state == espbt::ClientState::ESTABLISHED && this->characteristics_ready_;
   bool was_connected = this->last_connected_state_;
   if (connected_now != was_connected) {
@@ -233,12 +254,12 @@ void InliteHub::gattc_event_handler(esp_gattc_cb_event_t event, esp_gatt_if_t ga
 
     case ESP_GATTC_CLOSE_EVT:
       ESP_LOGW(TAG, "Disconnected from %s", this->parent()->address_str());
-      this->reset_ble_state_();
+      this->reset_ble_state_(true);
       this->publish_connected_state_();
       break;
 
     case ESP_GATTC_SEARCH_CMPL_EVT:
-      this->reset_ble_state_();
+      this->reset_ble_state_(false);
       if (this->configure_characteristics_()) {
         ESP_LOGI(TAG, "Mesh service discovered; registering notifications");
       }
@@ -304,7 +325,7 @@ void InliteHub::gap_event_handler(esp_gap_ble_cb_event_t event,
   }
 }
 
-void InliteHub::reset_ble_state_() {
+void InliteHub::reset_ble_state_(bool clear_pending) {
   this->characteristics_ready_ = false;
   this->continuation_notify_registered_ = false;
   this->complete_notify_registered_ = false;
@@ -319,6 +340,11 @@ void InliteHub::reset_ble_state_() {
   this->has_received_state_snapshot_ = false;
   this->has_bootstrap_snapshot_ = false;
   this->last_state_sync_request_ms_ = 0;
+  if (clear_pending) {
+    for (auto &pending : this->pending_line_states_) {
+      pending = {};
+    }
+  }
 }
 
 bool InliteHub::configure_characteristics_() {
@@ -371,13 +397,22 @@ void InliteHub::process_active_stream_() {
       return;
     }
 
+    QueuedMeshPayload queued = std::move(this->queue_.front());
+    this->queue_.pop_front();
+
     this->active_stream_.active = true;
     this->active_stream_.stage = StreamStage::SEND_START;
-    this->active_stream_.payload = this->queue_.front().payload;
+    this->active_stream_.payload = std::move(queued.payload);
     this->active_stream_.offset = 0;
     this->active_stream_.attempts = 0;
     this->active_stream_.expected_ack = 0;
-    this->queue_.pop_front();
+    this->active_stream_.is_line_command = queued.is_line_command;
+    this->active_stream_.line_id = queued.line_id;
+    this->active_stream_.desired_on = queued.desired_on;
+    this->active_stream_.pending_token = queued.pending_token;
+    if (queued.is_line_command) {
+      this->refresh_line_pending_started_ms_(queued.line_id, queued.pending_token);
+    }
   }
 
   switch (this->active_stream_.stage) {
@@ -585,6 +620,44 @@ void InliteHub::handle_block_data_(const std::vector<uint8_t> &payload) {
 
 void InliteHub::apply_line_mode_update_(uint8_t line_id, uint8_t output_mode, uint8_t output_state,
                                         uint8_t output_rtc_timer) {
+  bool remote_on = output_mode_is_on(output_mode);
+  bool pending_desired_on = false;
+  if (this->get_pending_line_target_(line_id, &pending_desired_on)) {
+    if (remote_on != pending_desired_on) {
+      bool line_command_still_pending_send = false;
+      if (this->active_stream_.active && this->active_stream_.is_line_command &&
+          this->active_stream_.line_id == line_id) {
+        line_command_still_pending_send = true;
+      } else {
+        for (const auto &queued : this->queue_) {
+          if (queued.is_line_command && queued.line_id == line_id) {
+            line_command_still_pending_send = true;
+            break;
+          }
+        }
+      }
+
+      if (line_command_still_pending_send) {
+        ESP_LOGD(TAG,
+                 "Ignoring stale line %u update mode=0x%02x while command is still pending",
+                 line_id, output_mode);
+        return;
+      }
+
+      // The latest expected command for this line has already been sent, but the
+      // hub still reports the opposite mode. Clear pending and request an
+      // immediate reconcile snapshot instead of waiting for periodic refresh.
+      ESP_LOGW(TAG,
+               "Line %u pending desired=%s contradicted by mode=0x%02x; clearing pending and reconciling",
+               line_id, pending_desired_on ? "on" : "off", output_mode);
+      this->clear_line_pending_(line_id);
+      this->queue_state_sync_request_(true);
+    } else {
+      this->clear_line_pending_(line_id);
+      ESP_LOGD(TAG, "Line %u pending target confirmed (%s)", line_id, remote_on ? "on" : "off");
+    }
+  }
+
   ESP_LOGD(TAG, "line %u update mode=0x%02x state=0x%02x rtc=%u", line_id, output_mode, output_state,
            output_rtc_timer);
   for (auto *line_light : this->line_lights_) {
@@ -644,8 +717,23 @@ void InliteHub::handle_stream_ack_(uint16_t ack_offset, bool end_ack) {
 }
 
 void InliteHub::finish_active_stream_(int status_code) {
+  StreamState completed = this->active_stream_;
+
   this->publish_last_command_status_(status_code);
   this->active_stream_ = {};
+
+  if (!completed.is_line_command) {
+    return;
+  }
+  if (status_code != 0) {
+    if (completed.line_id < this->pending_line_states_.size()) {
+      auto &pending = this->pending_line_states_[completed.line_id];
+      if (pending.active && pending.token == completed.pending_token) {
+        this->clear_line_pending_(completed.line_id);
+      }
+    }
+  }
+  this->queue_state_sync_request_(true);
 }
 
 std::vector<uint8_t> InliteHub::build_encrypted_packet_(uint16_t destination_id,
@@ -933,6 +1021,86 @@ void InliteHub::request_rssi_() {
   }
 }
 
+uint32_t InliteHub::pending_line_timeout_ms_() const {
+  uint32_t retries = static_cast<uint32_t>(this->retries_) + 1;
+  // A line command traverses START -> DATA -> END ACK phases; each phase can consume
+  // the full retry budget before we consider the command failed.
+  uint32_t stream_budget_ms = this->command_timeout_ms_ * retries * 3;
+  return std::max<uint32_t>(stream_budget_ms + 500, 2000);
+}
+
+uint32_t InliteHub::mark_line_pending_(uint8_t line_id, bool desired_on) {
+  if (line_id >= this->pending_line_states_.size()) {
+    return 0;
+  }
+  this->next_pending_token_++;
+  if (this->next_pending_token_ == 0) {
+    this->next_pending_token_ = 1;
+  }
+
+  auto &pending = this->pending_line_states_[line_id];
+  pending.active = true;
+  pending.desired_on = desired_on;
+  pending.started_ms = millis();
+  pending.token = this->next_pending_token_;
+  return pending.token;
+}
+
+void InliteHub::refresh_line_pending_started_ms_(uint8_t line_id, uint32_t pending_token) {
+  if (line_id >= this->pending_line_states_.size()) {
+    return;
+  }
+  auto &pending = this->pending_line_states_[line_id];
+  if (!pending.active || pending.token != pending_token) {
+    return;
+  }
+  pending.started_ms = millis();
+}
+
+void InliteHub::clear_line_pending_(uint8_t line_id) {
+  if (line_id >= this->pending_line_states_.size()) {
+    return;
+  }
+  this->pending_line_states_[line_id] = {};
+}
+
+bool InliteHub::get_pending_line_target_(uint8_t line_id, bool *desired_on) {
+  if (line_id >= this->pending_line_states_.size()) {
+    return false;
+  }
+  auto &pending = this->pending_line_states_[line_id];
+  if (!pending.active) {
+    return false;
+  }
+
+  uint32_t now = millis();
+  if (now - pending.started_ms > this->pending_line_timeout_ms_()) {
+    pending = {};
+    return false;
+  }
+
+  if (desired_on != nullptr) {
+    *desired_on = pending.desired_on;
+  }
+  return true;
+}
+
+void InliteHub::expire_stale_pending_lines_() {
+  uint32_t now = millis();
+  uint32_t timeout_ms = this->pending_line_timeout_ms_();
+  for (uint8_t line_id = 0; line_id < this->pending_line_states_.size(); line_id++) {
+    auto &pending = this->pending_line_states_[line_id];
+    if (!pending.active) {
+      continue;
+    }
+    if (now - pending.started_ms <= timeout_ms) {
+      continue;
+    }
+    ESP_LOGD(TAG, "Pending line %u target expired", line_id);
+    pending = {};
+  }
+}
+
 void InliteHub::publish_connected_state_() {
   if (this->connected_binary_sensor_ != nullptr) {
     bool connected_now = this->node_state == espbt::ClientState::ESTABLISHED && this->characteristics_ready_;
@@ -955,6 +1123,14 @@ light::LightTraits InliteLineLight::get_traits() {
 void InliteLineLight::write_state(light::LightState *state) {
   this->state_ = state;
   bool on = state->current_values.is_on();
+
+  light::LightColorValues values = state->remote_values;
+  values.set_color_mode(light::ColorMode::ON_OFF);
+  values.set_state(on);
+  state->remote_values = values;
+  state->current_values = values;
+  state->publish_state();
+
   if (this->parent_ != nullptr) {
     this->parent_->queue_line_command(this->line_, on);
   }
