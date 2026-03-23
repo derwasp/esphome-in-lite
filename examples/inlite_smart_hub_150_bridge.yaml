@@ -1,6 +1,8 @@
 substitutions:
   device_name: inlite_smart_hub_150_bridge
   friendly_name: in-lite Smart Hub-150 Bridge
+  fallback_ap_ssid: inlite150-bridge
+  entity_prefix: In-lite Bridge
 
 esphome:
   name: ${device_name}
@@ -33,7 +35,7 @@ wifi:
   ssid: !secret inlite_bridge_wifi_ssid
   password: !secret inlite_bridge_wifi_password
   ap:
-    ssid: ${device_name} Fallback
+    ssid: ${fallback_ap_ssid}
     password: CHANGE_ME_12345
 
 captive_portal:
@@ -78,34 +80,34 @@ light:
   - platform: inlite_hub
     inlite_hub_id: inlite_hub_main
     line: 0
-    name: In-lite Line 0
+    name: ${entity_prefix} Line 0
   - platform: inlite_hub
     inlite_hub_id: inlite_hub_main
     line: 1
-    name: In-lite Line 1
+    name: ${entity_prefix} Line 1
   - platform: inlite_hub
     inlite_hub_id: inlite_hub_main
     line: 2
-    name: In-lite Line 2
+    name: ${entity_prefix} Line 2
 
 sensor:
   - platform: inlite_hub
     inlite_hub_id: inlite_hub_main
     rssi:
-      name: In-lite BLE RSSI
+      name: ${entity_prefix} BLE RSSI
       entity_category: diagnostic
     last_command_status:
-      name: In-lite Last Command Status
+      name: ${entity_prefix} Last Command Status
       entity_category: diagnostic
 
 binary_sensor:
   - platform: inlite_hub
     inlite_hub_id: inlite_hub_main
     connected:
-      name: In-lite BLE Connected
+      name: ${entity_prefix} BLE Connected
       entity_category: diagnostic
 
 button:
   - platform: restart
-    name: In-lite Bridge Restart
+    name: ${entity_prefix} Restart
     entity_category: diagnostic
