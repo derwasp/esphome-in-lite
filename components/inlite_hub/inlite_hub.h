@@ -138,6 +138,7 @@ class InliteHub : public ble_client::BLEClientNode,
   void expire_stale_pending_lines_();
   uint32_t pending_line_timeout_ms_() const;
   uint32_t mark_line_pending_(uint8_t line_id, bool desired_on);
+  void refresh_line_pending_started_ms_(uint8_t line_id, uint32_t pending_token);
   void clear_line_pending_(uint8_t line_id);
   bool get_pending_line_target_(uint8_t line_id, bool *desired_on);
 

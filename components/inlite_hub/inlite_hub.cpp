@@ -410,6 +410,9 @@ void InliteHub::process_active_stream_() {
     this->active_stream_.line_id = queued.line_id;
     this->active_stream_.desired_on = queued.desired_on;
     this->active_stream_.pending_token = queued.pending_token;
+    if (queued.is_line_command) {
+      this->refresh_line_pending_started_ms_(queued.line_id, queued.pending_token);
+    }
   }
 
   switch (this->active_stream_.stage) {
@@ -649,10 +652,10 @@ void InliteHub::apply_line_mode_update_(uint8_t line_id, uint8_t output_mode, ui
                line_id, pending_desired_on ? "on" : "off", output_mode);
       this->clear_line_pending_(line_id);
       this->queue_state_sync_request_(true);
-      return;
+    } else {
+      this->clear_line_pending_(line_id);
+      ESP_LOGD(TAG, "Line %u pending target confirmed (%s)", line_id, remote_on ? "on" : "off");
     }
-    this->clear_line_pending_(line_id);
-    ESP_LOGD(TAG, "Line %u pending target confirmed (%s)", line_id, remote_on ? "on" : "off");
   }
 
   ESP_LOGD(TAG, "line %u update mode=0x%02x state=0x%02x rtc=%u", line_id, output_mode, output_state,
@@ -1041,6 +1044,17 @@ uint32_t InliteHub::mark_line_pending_(uint8_t line_id, bool desired_on) {
   pending.started_ms = millis();
   pending.token = this->next_pending_token_;
   return pending.token;
+}
+
+void InliteHub::refresh_line_pending_started_ms_(uint8_t line_id, uint32_t pending_token) {
+  if (line_id >= this->pending_line_states_.size()) {
+    return;
+  }
+  auto &pending = this->pending_line_states_[line_id];
+  if (!pending.active || pending.token != pending_token) {
+    return;
+  }
+  pending.started_ms = millis();
 }
 
 void InliteHub::clear_line_pending_(uint8_t line_id) {
