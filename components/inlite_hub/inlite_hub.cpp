@@ -89,6 +89,24 @@ void InliteHub::register_line_light(InliteLineLight *line_light) {
 }
 
 void InliteHub::queue_line_command(uint8_t line_id, bool on) {
+  if (line_id >= this->pending_line_states_.size()) {
+    ESP_LOGW(TAG, "Ignoring line command for out-of-range line_id=%u", line_id);
+    return;
+  }
+
+  size_t removed = 0;
+  for (auto it = this->queue_.begin(); it != this->queue_.end();) {
+    if (it->is_line_command && it->line_id == line_id) {
+      it = this->queue_.erase(it);
+      removed++;
+      continue;
+    }
+    ++it;
+  }
+  if (removed > 0) {
+    ESP_LOGD(TAG, "Coalesced %u queued command(s) for line %u", static_cast<unsigned>(removed), line_id);
+  }
+
   std::vector<uint8_t> mode_cmd = {
       kCmdTypeRequest,
       static_cast<uint8_t>(kOpcodeSetOutletMode & 0xFF),
@@ -97,7 +115,8 @@ void InliteHub::queue_line_command(uint8_t line_id, bool on) {
       static_cast<uint8_t>(on ? 0x01 : 0x00),
       0x01,
   };
-  this->queue_.push_back({mode_cmd});
+  this->queue_.push_back({mode_cmd, true, line_id, on});
+  this->mark_line_pending_(line_id, on);
 }
 
 void InliteHub::queue_state_sync_request_(bool force) {
@@ -201,6 +220,8 @@ bool InliteHub::parse_device(const espbt::ESPBTDevice &device) {
 }
 
 void InliteHub::loop() {
+  this->expire_stale_pending_lines_();
+
   bool connected_now = this->node_state == espbt::ClientState::ESTABLISHED && this->characteristics_ready_;
   bool was_connected = this->last_connected_state_;
   if (connected_now != was_connected) {
@@ -319,6 +340,9 @@ void InliteHub::reset_ble_state_() {
   this->has_received_state_snapshot_ = false;
   this->has_bootstrap_snapshot_ = false;
   this->last_state_sync_request_ms_ = 0;
+  for (auto &pending : this->pending_line_states_) {
+    pending = {};
+  }
 }
 
 bool InliteHub::configure_characteristics_() {
@@ -371,13 +395,18 @@ void InliteHub::process_active_stream_() {
       return;
     }
 
+    QueuedMeshPayload queued = std::move(this->queue_.front());
+    this->queue_.pop_front();
+
     this->active_stream_.active = true;
     this->active_stream_.stage = StreamStage::SEND_START;
-    this->active_stream_.payload = this->queue_.front().payload;
+    this->active_stream_.payload = std::move(queued.payload);
     this->active_stream_.offset = 0;
     this->active_stream_.attempts = 0;
     this->active_stream_.expected_ack = 0;
-    this->queue_.pop_front();
+    this->active_stream_.is_line_command = queued.is_line_command;
+    this->active_stream_.line_id = queued.line_id;
+    this->active_stream_.desired_on = queued.desired_on;
   }
 
   switch (this->active_stream_.stage) {
@@ -585,6 +614,19 @@ void InliteHub::handle_block_data_(const std::vector<uint8_t> &payload) {
 
 void InliteHub::apply_line_mode_update_(uint8_t line_id, uint8_t output_mode, uint8_t output_state,
                                         uint8_t output_rtc_timer) {
+  bool remote_on = output_mode_is_on(output_mode);
+  bool pending_desired_on = false;
+  if (this->get_pending_line_target_(line_id, &pending_desired_on)) {
+    if (remote_on != pending_desired_on) {
+      ESP_LOGD(TAG,
+               "Ignoring stale line %u update mode=0x%02x while pending desired=%s",
+               line_id, output_mode, pending_desired_on ? "on" : "off");
+      return;
+    }
+    this->clear_line_pending_(line_id);
+    ESP_LOGD(TAG, "Line %u pending target confirmed (%s)", line_id, remote_on ? "on" : "off");
+  }
+
   ESP_LOGD(TAG, "line %u update mode=0x%02x state=0x%02x rtc=%u", line_id, output_mode, output_state,
            output_rtc_timer);
   for (auto *line_light : this->line_lights_) {
@@ -644,8 +686,18 @@ void InliteHub::handle_stream_ack_(uint16_t ack_offset, bool end_ack) {
 }
 
 void InliteHub::finish_active_stream_(int status_code) {
+  StreamState completed = this->active_stream_;
+
   this->publish_last_command_status_(status_code);
   this->active_stream_ = {};
+
+  if (!completed.is_line_command) {
+    return;
+  }
+  if (status_code != 0) {
+    this->clear_line_pending_(completed.line_id);
+  }
+  this->queue_state_sync_request_(true);
 }
 
 std::vector<uint8_t> InliteHub::build_encrypted_packet_(uint16_t destination_id,
@@ -933,6 +985,66 @@ void InliteHub::request_rssi_() {
   }
 }
 
+uint32_t InliteHub::pending_line_timeout_ms_() const {
+  uint32_t retries = static_cast<uint32_t>(this->retries_) + 1;
+  uint32_t request_budget_ms = this->command_timeout_ms_ * retries;
+  return std::max<uint32_t>(request_budget_ms + 500, 1500);
+}
+
+void InliteHub::mark_line_pending_(uint8_t line_id, bool desired_on) {
+  if (line_id >= this->pending_line_states_.size()) {
+    return;
+  }
+  auto &pending = this->pending_line_states_[line_id];
+  pending.active = true;
+  pending.desired_on = desired_on;
+  pending.started_ms = millis();
+}
+
+void InliteHub::clear_line_pending_(uint8_t line_id) {
+  if (line_id >= this->pending_line_states_.size()) {
+    return;
+  }
+  this->pending_line_states_[line_id] = {};
+}
+
+bool InliteHub::get_pending_line_target_(uint8_t line_id, bool *desired_on) {
+  if (line_id >= this->pending_line_states_.size()) {
+    return false;
+  }
+  auto &pending = this->pending_line_states_[line_id];
+  if (!pending.active) {
+    return false;
+  }
+
+  uint32_t now = millis();
+  if (now - pending.started_ms > this->pending_line_timeout_ms_()) {
+    pending = {};
+    return false;
+  }
+
+  if (desired_on != nullptr) {
+    *desired_on = pending.desired_on;
+  }
+  return true;
+}
+
+void InliteHub::expire_stale_pending_lines_() {
+  uint32_t now = millis();
+  uint32_t timeout_ms = this->pending_line_timeout_ms_();
+  for (uint8_t line_id = 0; line_id < this->pending_line_states_.size(); line_id++) {
+    auto &pending = this->pending_line_states_[line_id];
+    if (!pending.active) {
+      continue;
+    }
+    if (now - pending.started_ms <= timeout_ms) {
+      continue;
+    }
+    ESP_LOGD(TAG, "Pending line %u target expired", line_id);
+    pending = {};
+  }
+}
+
 void InliteHub::publish_connected_state_() {
   if (this->connected_binary_sensor_ != nullptr) {
     bool connected_now = this->node_state == espbt::ClientState::ESTABLISHED && this->characteristics_ready_;
@@ -955,6 +1067,14 @@ light::LightTraits InliteLineLight::get_traits() {
 void InliteLineLight::write_state(light::LightState *state) {
   this->state_ = state;
   bool on = state->current_values.is_on();
+
+  light::LightColorValues values = state->remote_values;
+  values.set_color_mode(light::ColorMode::ON_OFF);
+  values.set_state(on);
+  state->remote_values = values;
+  state->current_values = values;
+  state->publish_state();
+
   if (this->parent_ != nullptr) {
     this->parent_->queue_line_command(this->line_, on);
   }
