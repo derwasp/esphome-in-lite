@@ -621,9 +621,34 @@ void InliteHub::apply_line_mode_update_(uint8_t line_id, uint8_t output_mode, ui
   bool pending_desired_on = false;
   if (this->get_pending_line_target_(line_id, &pending_desired_on)) {
     if (remote_on != pending_desired_on) {
-      ESP_LOGD(TAG,
-               "Ignoring stale line %u update mode=0x%02x while pending desired=%s",
-               line_id, output_mode, pending_desired_on ? "on" : "off");
+      bool line_command_still_pending_send = false;
+      if (this->active_stream_.active && this->active_stream_.is_line_command &&
+          this->active_stream_.line_id == line_id) {
+        line_command_still_pending_send = true;
+      } else {
+        for (const auto &queued : this->queue_) {
+          if (queued.is_line_command && queued.line_id == line_id) {
+            line_command_still_pending_send = true;
+            break;
+          }
+        }
+      }
+
+      if (line_command_still_pending_send) {
+        ESP_LOGD(TAG,
+                 "Ignoring stale line %u update mode=0x%02x while command is still pending",
+                 line_id, output_mode);
+        return;
+      }
+
+      // The latest expected command for this line has already been sent, but the
+      // hub still reports the opposite mode. Clear pending and request an
+      // immediate reconcile snapshot instead of waiting for periodic refresh.
+      ESP_LOGW(TAG,
+               "Line %u pending desired=%s contradicted by mode=0x%02x; clearing pending and reconciling",
+               line_id, pending_desired_on ? "on" : "off", output_mode);
+      this->clear_line_pending_(line_id);
+      this->queue_state_sync_request_(true);
       return;
     }
     this->clear_line_pending_(line_id);
