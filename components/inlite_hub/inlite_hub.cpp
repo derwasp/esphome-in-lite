@@ -644,9 +644,6 @@ void InliteHub::apply_line_mode_update_(uint8_t line_id, uint8_t output_mode, ui
         return;
       }
 
-      // The latest expected command for this line has already been sent, but the
-      // hub still reports the opposite mode. Keep the pending guard active so
-      // delayed stale snapshots do not flip HA state.
       ESP_LOGW(TAG,
                "Line %u pending desired=%s contradicted by mode=0x%02x; keeping pending guard and reconciling",
                line_id, pending_desired_on ? "on" : "off", output_mode);
@@ -654,13 +651,8 @@ void InliteHub::apply_line_mode_update_(uint8_t line_id, uint8_t output_mode, ui
         this->pending_line_states_[line_id].started_ms = millis();
       }
       this->queue_state_sync_request_(true);
-      // Do not publish the contradictory frame immediately; it causes visible
-      // on/off jitter during rapid multi-line toggles. Let the forced sync
-      // provide the authoritative state snapshot.
       return;
     } else {
-      // Keep pending active through its timeout window so delayed stale
-      // snapshots are still filtered after initial confirmation.
       ESP_LOGD(TAG, "Line %u pending target confirmed (%s)", line_id, remote_on ? "on" : "off");
     }
   }
@@ -1033,8 +1025,6 @@ uint32_t InliteHub::pending_line_timeout_ms_() const {
   // A line command traverses START -> DATA -> END ACK phases; each phase can consume
   // the full retry budget before we consider the command failed.
   uint32_t stream_budget_ms = this->command_timeout_ms_ * retries * 3;
-  // Keep guard active long enough to absorb delayed stale snapshots observed
-  // several seconds after command completion.
   return std::max<uint32_t>(stream_budget_ms + 5000, 6000);
 }
 
