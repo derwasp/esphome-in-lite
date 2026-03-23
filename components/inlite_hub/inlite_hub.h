@@ -140,6 +140,10 @@ class InliteHub : public ble_client::BLEClientNode,
   bool configure_characteristics_();
   void process_active_stream_();
   bool retry_or_fail_();
+  void reset_line_batch_state_();
+  void rotate_line_batch_window_if_needed_(uint32_t now);
+  bool should_delay_queued_line_command_(uint32_t now, const QueuedMeshPayload &queued);
+  void note_line_command_completion_(int status_code, uint32_t now);
   void queue_state_sync_request_(bool force);
   void expire_stale_pending_lines_();
   uint32_t pending_line_timeout_ms_() const;

@@ -344,10 +344,7 @@ void InliteHub::reset_ble_state_(bool clear_pending) {
   this->has_received_state_snapshot_ = false;
   this->has_bootstrap_snapshot_ = false;
   this->last_state_sync_request_ms_ = 0;
-  this->line_batch_started_ms_ = 0;
-  this->line_command_ready_ms_ = 0;
-  this->last_line_command_completed_ms_ = 0;
-  this->line_batch_sent_count_ = 0;
+  this->reset_line_batch_state_();
   if (clear_pending) {
     for (auto &pending : this->pending_line_states_) {
       pending = {};
@@ -399,6 +396,63 @@ bool InliteHub::configure_characteristics_() {
   return true;
 }
 
+void InliteHub::reset_line_batch_state_() {
+  this->line_batch_started_ms_ = 0;
+  this->line_command_ready_ms_ = 0;
+  this->last_line_command_completed_ms_ = 0;
+  this->line_batch_sent_count_ = 0;
+}
+
+void InliteHub::rotate_line_batch_window_if_needed_(uint32_t now) {
+  if (this->line_batch_started_ms_ == 0 || now - this->line_batch_started_ms_ > kLineBatchTimeoutMs ||
+      this->line_batch_sent_count_ >= kLineBatchAcknowledgedLimit) {
+    this->line_batch_started_ms_ = now;
+    this->line_batch_sent_count_ = 0;
+  }
+}
+
+bool InliteHub::should_delay_queued_line_command_(uint32_t now, const QueuedMeshPayload &queued) {
+  if (!queued.is_line_command) {
+    this->line_batch_started_ms_ = 0;
+    this->line_batch_sent_count_ = 0;
+    return false;
+  }
+
+  this->rotate_line_batch_window_if_needed_(now);
+
+  if (now < this->line_command_ready_ms_) {
+    return true;
+  }
+  if (this->line_batch_sent_count_ > 0 &&
+      now - this->last_line_command_completed_ms_ < kLineBatchDelayMs) {
+    return true;
+  }
+
+  if (this->line_batch_sent_count_ >= kLineBatchSize) {
+    this->line_batch_started_ms_ = now;
+    this->line_batch_sent_count_ = 0;
+  }
+
+  return false;
+}
+
+void InliteHub::note_line_command_completion_(int status_code, uint32_t now) {
+  this->last_line_command_completed_ms_ = now;
+
+  if (status_code == 0) {
+    this->line_command_ready_ms_ = now + kLineBatchDelayMs;
+    this->rotate_line_batch_window_if_needed_(now);
+    if (this->line_batch_sent_count_ < kLineBatchAcknowledgedLimit) {
+      this->line_batch_sent_count_++;
+    }
+    return;
+  }
+
+  this->line_command_ready_ms_ = now + kLineRetryDelayMs;
+  this->line_batch_started_ms_ = now;
+  this->line_batch_sent_count_ = 0;
+}
+
 void InliteHub::process_active_stream_() {
   if (!this->active_stream_.active) {
     if (this->queue_.empty()) {
@@ -406,31 +460,8 @@ void InliteHub::process_active_stream_() {
     }
 
     uint32_t now = millis();
-    const auto &next = this->queue_.front();
-    if (next.is_line_command) {
-      if (this->line_batch_started_ms_ == 0 ||
-          now - this->line_batch_started_ms_ > kLineBatchTimeoutMs ||
-          this->line_batch_sent_count_ >= kLineBatchAcknowledgedLimit) {
-        this->line_batch_started_ms_ = now;
-        this->line_batch_sent_count_ = 0;
-      }
-
-      if (now < this->line_command_ready_ms_) {
-        return;
-      }
-
-      if (this->line_batch_sent_count_ > 0 &&
-          now - this->last_line_command_completed_ms_ < kLineBatchDelayMs) {
-        return;
-      }
-
-      if (this->line_batch_sent_count_ >= kLineBatchSize) {
-        this->line_batch_started_ms_ = now;
-        this->line_batch_sent_count_ = 0;
-      }
-    } else {
-      this->line_batch_started_ms_ = 0;
-      this->line_batch_sent_count_ = 0;
+    if (this->should_delay_queued_line_command_(now, this->queue_.front())) {
+      return;
     }
 
     QueuedMeshPayload queued = std::move(this->queue_.front());
@@ -761,23 +792,7 @@ void InliteHub::finish_active_stream_(int status_code) {
     return;
   }
   uint32_t now = millis();
-  this->last_line_command_completed_ms_ = now;
-
-  if (status_code == 0) {
-    this->line_command_ready_ms_ = now + kLineBatchDelayMs;
-    if (this->line_batch_started_ms_ == 0 ||
-        now - this->line_batch_started_ms_ > kLineBatchTimeoutMs) {
-      this->line_batch_started_ms_ = now;
-      this->line_batch_sent_count_ = 0;
-    }
-    if (this->line_batch_sent_count_ < kLineBatchAcknowledgedLimit) {
-      this->line_batch_sent_count_++;
-    }
-  } else {
-    this->line_command_ready_ms_ = now + kLineRetryDelayMs;
-    this->line_batch_started_ms_ = now;
-    this->line_batch_sent_count_ = 0;
-  }
+  this->note_line_command_completion_(status_code, now);
 
   if (status_code != 0) {
     if (completed.line_id < this->pending_line_states_.size()) {
