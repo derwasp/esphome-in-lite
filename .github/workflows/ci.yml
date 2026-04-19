@@ -5,16 +5,27 @@ on:
   push:
     branches:
       - main
+    tags:
+      - '*'
 
 permissions:
   contents: read
 
+env:
+  SMOKE_CONFIG: .ci/esphome_smoke.yaml
+  SMOKE_NODE_NAME: ci-inlite-smoke
+
 jobs:
   checks:
     runs-on: ubuntu-latest
+    outputs:
+      artifact_name: ${{ steps.package.outputs.artifact_name }}
+      firmware_version: ${{ steps.version.outputs.firmware_version }}
     steps:
       - name: Check out repository
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       - name: Set up Python
         uses: actions/setup-python@v5
@@ -26,11 +37,56 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements-dev.txt
 
+      - name: Determine build branch
+        id: branch
+        env:
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+        run: |
+          if [ -n "${GITHUB_HEAD_REF}" ]; then
+            branch_name="${GITHUB_HEAD_REF}"
+          elif [ "${GITHUB_REF_TYPE}" = "branch" ] && [ -n "${GITHUB_REF_NAME}" ]; then
+            branch_name="${GITHUB_REF_NAME}"
+          else
+            matching_branches="$(
+              git for-each-ref --format='%(refname:short)' --contains HEAD refs/remotes/origin \
+                | sed 's#^origin/##' \
+                | grep -v '^HEAD$' || true
+            )"
+            if printf '%s\n' "${matching_branches}" | grep -qx "${DEFAULT_BRANCH}"; then
+              branch_name="${DEFAULT_BRANCH}"
+            else
+              branch_name="$(printf '%s\n' "${matching_branches}" | head -n 1)"
+            fi
+          fi
+
+          if [ -z "${branch_name}" ]; then
+            branch_name="${DEFAULT_BRANCH:-detached}"
+          fi
+
+          echo "branch_name=${branch_name}" >> "${GITHUB_OUTPUT}"
+          echo "Build branch: ${branch_name}"
+
+      - name: Determine firmware version
+        id: version
+        run: |
+          firmware_version="$(
+            python tools/build_branch_firmware.py \
+              --branch "${{ steps.branch.outputs.branch_name }}" \
+              --print-version \
+              "${SMOKE_CONFIG}"
+          )"
+          echo "firmware_version=${firmware_version}" >> "${GITHUB_OUTPUT}"
+          echo "Firmware version: ${firmware_version}"
+
       - name: Validate ESPHome config
-        run: esphome config .ci/esphome_smoke.yaml
+        run: esphome config "${SMOKE_CONFIG}"
 
       - name: Compile ESPHome config
-        run: esphome compile .ci/esphome_smoke.yaml
+        run: |
+          python tools/build_branch_firmware.py \
+            --branch "${{ steps.branch.outputs.branch_name }}" \
+            "${SMOKE_CONFIG}" \
+            compile
 
       - name: Run BLE harness self-test
         run: python tools/inlite_ble_harness.py selftest
@@ -40,3 +96,80 @@ jobs:
 
       - name: Compile Python sources
         run: python -m compileall components tools
+
+      - name: Package firmware artifact
+        id: package
+        if: github.event_name == 'push' && (github.ref == format('refs/heads/{0}', github.event.repository.default_branch) || startsWith(github.ref, 'refs/tags/'))
+        env:
+          BUILD_BRANCH: ${{ steps.branch.outputs.branch_name }}
+          FIRMWARE_VERSION: ${{ steps.version.outputs.firmware_version }}
+        run: |
+          artifact_name="inlite-smoke-${FIRMWARE_VERSION}"
+          artifact_root="dist/${artifact_name}"
+          build_root=".esphome/build/${SMOKE_NODE_NAME}"
+
+          mapfile -d '' build_files < <(
+            find "${build_root}" -type f \
+              \( -name '*.bin' -o -name '*.elf' -o -name '*.json' -o -name 'partitions.csv' \) \
+              -print0
+          )
+
+          if [ "${#build_files[@]}" -eq 0 ]; then
+            echo "No firmware files found under ${build_root}" >&2
+            exit 1
+          fi
+
+          mkdir -p "${artifact_root}"
+          for file in "${build_files[@]}"; do
+            rel_path="${file#${build_root}/}"
+            install -D "${file}" "${artifact_root}/${rel_path}"
+          done
+
+          cat > "${artifact_root}/build-info.txt" <<EOF
+          firmware_version=${FIRMWARE_VERSION}
+          branch_name=${BUILD_BRANCH}
+          git_sha=${GITHUB_SHA}
+          git_ref=${GITHUB_REF}
+          workflow_run=${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}
+          EOF
+
+          (
+            cd dist
+            zip -r "${artifact_name}.zip" "${artifact_name}"
+          )
+
+          echo "artifact_name=${artifact_name}" >> "${GITHUB_OUTPUT}"
+
+      - name: Upload firmware artifact
+        if: github.event_name == 'push' && (github.ref == format('refs/heads/{0}', github.event.repository.default_branch) || startsWith(github.ref, 'refs/tags/'))
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.package.outputs.artifact_name }}
+          path: dist/${{ steps.package.outputs.artifact_name }}.zip
+          if-no-files-found: error
+
+  publish_release:
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/')
+    needs: checks
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Download firmware artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: ${{ needs.checks.outputs.artifact_name }}
+          path: dist
+
+      - name: Publish release asset
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG_NAME: ${{ github.ref_name }}
+          ASSET_NAME: ${{ needs.checks.outputs.artifact_name }}.zip
+        run: |
+          asset_path="dist/${ASSET_NAME}"
+          gh release view "${TAG_NAME}" >/dev/null 2>&1 || \
+            gh release create "${TAG_NAME}" \
+              --title "${TAG_NAME}" \
+              --notes "Automated firmware build for ${TAG_NAME}"
+          gh release upload "${TAG_NAME}" "${asset_path}" --clobber

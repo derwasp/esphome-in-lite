@@ -21,6 +21,49 @@ source ./activate.sh
 pip install -r requirements-harness.txt
 ```
 
+## Branch-stamped Firmware Builds
+
+Use `tools/build_branch_firmware.py` when you want the ESPHome `project.version`
+shown in Home Assistant to include the current git branch, for example
+`0.9.0-codex-branch-version-build-script`.
+
+Wrapper options such as `--branch` and `--base-version` can appear before or
+after the optional ESPHome command. Pass extra ESPHome arguments after `--`.
+
+By default the script derives the base version from git:
+
+- an exact tag like `0.9.0` or `v0.9.0` becomes `0.9.0-{branch}`
+- otherwise the latest tag contributes `major.minor`, and the patch number
+  becomes the commit count since that tag, for example `0.9.4-{branch}`
+- if the repository has no tags yet, it falls back to `0.9.0-{branch}`
+
+Compile with the current branch name:
+
+```bash
+python3 tools/build_branch_firmware.py your_node.yaml
+```
+
+Upload with the current branch name:
+
+```bash
+python3 tools/build_branch_firmware.py your_node.yaml upload -- --device your_node.local
+```
+
+Override the base version or branch tag:
+
+```bash
+python3 tools/build_branch_firmware.py \
+  your_node.yaml \
+  --base-version 1.0.0 \
+  --branch release-candidate
+```
+
+Print the derived version without compiling:
+
+```bash
+python3 tools/build_branch_firmware.py your_node.yaml --print-version
+```
+
 ## Interactive Console
 
 The live console keeps a connection open, shows connection and line state, lets you toggle lines `1` to `3`, and shows the BLE traffic log at the bottom.
