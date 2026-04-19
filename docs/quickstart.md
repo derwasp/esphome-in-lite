@@ -92,7 +92,7 @@ esphome compile your_node.yaml
 pip install -r requirements-harness.txt
 python3 tools/inlite_ble_harness.py selftest
 python3 tools/inlite_ble_harness.py \
-  --hub-id 0x163E \
+  --hub-id 0x1234 \
   --passphrase-hex YOUR_HEX \
   --timeout-ms 1200 \
   --retries 4 \
@@ -100,7 +100,7 @@ python3 tools/inlite_ble_harness.py \
   line 0 on --auto-discover --discover-seconds 12
 
 python3 tools/inlite_ble_harness.py \
-  --hub-id 0x163E \
+  --hub-id 0x1234 \
   --passphrase-hex YOUR_HEX \
   --timeout-ms 1200 \
   --retries 4 \
