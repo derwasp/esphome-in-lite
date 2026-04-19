@@ -10,7 +10,7 @@ esphome:
   comment: Local BLE bridge for in-lite Smart Hub-150 (FW 52) using inlite_hub external component.
   project:
     name: local.inlite_smart_hub_150_bridge
-    version: "0.1.0"
+    version: "0.9.0"
 
 esp32:
   board: esp32dev
