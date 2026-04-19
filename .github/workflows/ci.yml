@@ -106,7 +106,8 @@ jobs:
         run: |
           artifact_name="inlite-smoke-${FIRMWARE_VERSION}"
           artifact_root="dist/${artifact_name}"
-          build_root=".esphome/build/${SMOKE_NODE_NAME}"
+          config_dir="$(dirname "${SMOKE_CONFIG}")"
+          build_root="${config_dir}/.esphome/build/${SMOKE_NODE_NAME}"
 
           mapfile -d '' build_files < <(
             find "${build_root}" -type f \
