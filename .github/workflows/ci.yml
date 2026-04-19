@@ -29,6 +29,9 @@ jobs:
       - name: Validate ESPHome config
         run: esphome config .ci/esphome_smoke.yaml
 
+      - name: Compile ESPHome config
+        run: esphome compile .ci/esphome_smoke.yaml
+
       - name: Run BLE harness self-test
         run: python tools/inlite_ble_harness.py selftest
 

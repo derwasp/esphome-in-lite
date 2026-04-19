@@ -3,7 +3,7 @@ import esphome.config_validation as cv
 from esphome.components import ble_client, esp32_ble_tracker
 from esphome.const import CONF_ID
 
-AUTO_LOAD = ["light", "sensor", "binary_sensor"]
+AUTO_LOAD = ["light", "sensor", "binary_sensor", "button"]
 DEPENDENCIES = ["esp32", "ble_client"]
 MULTI_CONF = True
 
@@ -13,6 +13,7 @@ CONF_COMMAND_TIMEOUT = "command_timeout"
 CONF_RETRIES = "retries"
 CONF_POLL_INTERVAL = "poll_interval"
 CONF_STATE_REFRESH_INTERVAL = "state_refresh_interval"
+CONF_DEBUG_TRANSPORT = "debug_transport"
 CONF_NETWORK_PASSPHRASE_HEX = "network_passphrase_hex"
 CONF_AUTO_DISCOVER = "auto_discover"
 CONF_DISCOVER_NAME_FILTER = "discover_name_filter"
@@ -60,6 +61,7 @@ CONFIG_SCHEMA = (
             cv.Optional(
                 CONF_STATE_REFRESH_INTERVAL, default="5min"
             ): cv.positive_time_period_milliseconds,
+            cv.Optional(CONF_DEBUG_TRANSPORT, default=False): cv.boolean,
         }
     )
     .extend(cv.COMPONENT_SCHEMA)
@@ -82,3 +84,4 @@ async def to_code(config):
     cg.add(var.set_retries(config[CONF_RETRIES]))
     cg.add(var.set_update_interval(config[CONF_POLL_INTERVAL]))
     cg.add(var.set_state_refresh_interval(config[CONF_STATE_REFRESH_INTERVAL]))
+    cg.add(var.set_debug_transport(config[CONF_DEBUG_TRANSPORT]))

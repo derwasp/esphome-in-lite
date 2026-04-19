@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <cctype>
 #include <cstring>
+#include <inttypes.h>
 #include <string>
 
 #include <esp_bt_defs.h>
@@ -77,6 +78,7 @@ void InliteHub::dump_config() {
   }
   ESP_LOGCONFIG(TAG, "  Command timeout: %ums", this->command_timeout_ms_);
   ESP_LOGCONFIG(TAG, "  Retries: %u", this->retries_);
+  ESP_LOGCONFIG(TAG, "  Debug transport: %s", this->debug_transport_ ? "yes" : "no");
   ESP_LOGCONFIG(TAG, "  Connected: %s", this->last_connected_state_ ? "yes" : "no");
 
   if (this->hub_id_ == 0) {
@@ -119,8 +121,36 @@ void InliteHub::queue_line_command(uint8_t line_id, bool on) {
   this->queue_.push_back({mode_cmd, true, line_id, on, pending_token});
 }
 
+void InliteHub::debug_request_state_refresh() {
+  if (this->debug_transport_) {
+    ESP_LOGD(TAG, "Debug button pressed: refresh_state");
+  }
+  this->queue_state_sync_request_(true);
+}
+
+void InliteHub::debug_request_reconnect() {
+  if (this->debug_transport_) {
+    ESP_LOGD(TAG, "Debug button pressed: reconnect");
+  }
+
+  this->force_refresh_on_next_connect_ = true;
+  this->last_state_sync_request_ms_ = 0;
+  this->has_bootstrap_snapshot_ = false;
+  this->clear_transport_runtime_(true, true);
+
+  if (this->parent() != nullptr && this->node_state != espbt::ClientState::IDLE) {
+    this->parent()->disconnect();
+  }
+}
+
 void InliteHub::queue_state_sync_request_(bool force) {
   if (this->node_state != espbt::ClientState::ESTABLISHED || !this->characteristics_ready_) {
+    if (force) {
+      this->force_refresh_on_next_connect_ = true;
+      if (this->debug_transport_) {
+        ESP_LOGD(TAG, "Deferring GET_INFO_DEVICES until the next established session");
+      }
+    }
     return;
   }
 
@@ -129,16 +159,14 @@ void InliteHub::queue_state_sync_request_(bool force) {
       static_cast<uint8_t>(kOpcodeGetInfoDevices & 0xFF),
       static_cast<uint8_t>((kOpcodeGetInfoDevices >> 8) & 0xFF),
   };
-  auto payload_is_get_info = [&](const std::vector<uint8_t> &payload) {
-    return payload.size() == get_info_cmd.size() &&
-           std::equal(payload.begin(), payload.end(), get_info_cmd.begin());
-  };
 
-  if (this->active_stream_.active && payload_is_get_info(this->active_stream_.payload)) {
+  if (this->active_stream_.active && this->is_get_info_devices_payload_(this->active_stream_.payload)) {
+    this->force_refresh_on_next_connect_ = false;
     return;
   }
   for (const auto &queued : this->queue_) {
-    if (payload_is_get_info(queued.payload)) {
+    if (this->is_get_info_devices_payload_(queued.payload)) {
+      this->force_refresh_on_next_connect_ = false;
       return;
     }
   }
@@ -155,6 +183,7 @@ void InliteHub::queue_state_sync_request_(bool force) {
 
   this->queue_.push_back({get_info_cmd});
   this->last_state_sync_request_ms_ = now;
+  this->force_refresh_on_next_connect_ = false;
   ESP_LOGD(TAG, "Queued state sync request (GET_INFO_DEVICES)");
 }
 
@@ -236,9 +265,16 @@ void InliteHub::loop() {
     return;
   }
 
+  if (this->force_refresh_on_next_connect_) {
+    this->queue_state_sync_request_(true);
+  }
+
+  this->process_rx_packet_queue_();
+  this->expire_reverse_stream_();
+
   // Enforce refresh cadence independently of PollingComponent update() cadence.
   this->queue_state_sync_request_(false);
-  this->process_active_stream_();
+  this->process_transport_packets_();
 }
 
 void InliteHub::update() { this->request_rssi_(); }
@@ -297,7 +333,26 @@ void InliteHub::gattc_event_handler(esp_gattc_cb_event_t event, esp_gatt_if_t ga
 
         MeshPacket packet;
         if (this->decrypt_packet_(this->incoming_packet_buffer_, packet)) {
-          this->handle_mesh_packet_(packet);
+          if (this->debug_transport_) {
+            ESP_LOGD(TAG,
+                     "RX mesh packet seq=0x%06" PRIx32 " src=0x%04x dst=0x%04x type=%u len=%u",
+                     packet.sequence, packet.source_id, packet.destination_id, packet.packet_type,
+                     static_cast<unsigned int>(packet.payload.size()));
+          }
+          if (this->parent() != nullptr) {
+            const uint32_t session_token = this->transport_session_token_;
+            this->parent()->run_later([this, packet = std::move(packet), session_token]() mutable {
+              if (this->transport_session_token_ != session_token) {
+                if (this->debug_transport_) {
+                  ESP_LOGD(TAG, "Dropping deferred RX packet from a stale transport session");
+                }
+                return;
+              }
+              this->rx_packet_queue_.push_back(std::move(packet));
+            });
+          }
+        } else if (this->debug_transport_) {
+          ESP_LOGD(TAG, "Dropped mesh packet with invalid checksum or payload");
         }
         this->incoming_packet_buffer_.clear();
       }
@@ -335,15 +390,31 @@ void InliteHub::reset_ble_state_(bool clear_pending) {
   this->continuation_write_handle_ = 0;
   this->complete_write_handle_ = 0;
 
-  this->incoming_packet_buffer_.clear();
-  this->active_stream_ = {};
+  this->clear_transport_runtime_(false, clear_pending);
   this->has_received_state_snapshot_ = false;
   this->has_bootstrap_snapshot_ = false;
   this->last_state_sync_request_ms_ = 0;
-  if (clear_pending) {
-    for (auto &pending : this->pending_line_states_) {
-      pending = {};
-    }
+}
+
+void InliteHub::clear_transport_runtime_(bool clear_command_queue, bool clear_pending_lines) {
+  this->transport_session_token_++;
+  this->incoming_packet_buffer_.clear();
+  this->rx_packet_queue_.clear();
+  this->pending_transport_packets_.clear();
+  this->active_stream_ = {};
+  this->reverse_stream_ = {};
+  this->completed_reverse_stream_ = {};
+
+  if (clear_command_queue) {
+    this->queue_.clear();
+  }
+
+  if (!clear_pending_lines) {
+    return;
+  }
+
+  for (auto &pending : this->pending_line_states_) {
+    pending = {};
   }
 }
 
@@ -391,6 +462,184 @@ bool InliteHub::configure_characteristics_() {
   return true;
 }
 
+void InliteHub::process_rx_packet_queue_() {
+  while (!this->rx_packet_queue_.empty()) {
+    MeshPacket packet = std::move(this->rx_packet_queue_.front());
+    this->rx_packet_queue_.pop_front();
+    this->handle_mesh_packet_(packet);
+  }
+}
+
+void InliteHub::process_transport_packets_() {
+  while (this->process_pending_transport_packets_()) {
+  }
+  this->process_active_stream_();
+}
+
+bool InliteHub::process_pending_transport_packets_() {
+  if (this->pending_transport_packets_.empty()) {
+    return false;
+  }
+
+  QueuedTransportPacket packet = std::move(this->pending_transport_packets_.front());
+  this->pending_transport_packets_.pop_front();
+
+  std::vector<uint8_t> encrypted =
+      this->build_encrypted_packet_(packet.destination_id, packet.packet_type, packet.payload, kTtlDefault);
+  if (encrypted.empty()) {
+    return false;
+  }
+
+  if (this->debug_transport_) {
+    ESP_LOGD(TAG, "TX control packet dst=0x%04x type=%u len=%u", packet.destination_id,
+             packet.packet_type, static_cast<unsigned int>(packet.payload.size()));
+  }
+
+  if (!this->send_encrypted_packet_(encrypted)) {
+    ESP_LOGW(TAG, "Failed to send queued transport packet type=%u dst=0x%04x",
+             packet.packet_type, packet.destination_id);
+  }
+
+  return !this->pending_transport_packets_.empty();
+}
+
+void InliteHub::queue_reverse_stream_ack_(uint16_t destination_id, uint16_t ack_offset, bool end_ack) {
+  std::vector<uint8_t> payload = {
+      static_cast<uint8_t>(ack_offset & 0xFF),
+      static_cast<uint8_t>((ack_offset >> 8) & 0xFF),
+  };
+  if (end_ack) {
+    payload.push_back(kEndAckMagic);
+  }
+
+  if (this->debug_transport_) {
+    ESP_LOGD(TAG, "Queueing reverse-stream %s offset=0x%04x to 0x%04x",
+             end_ack ? "END_ACK" : "ACK", ack_offset, destination_id);
+  }
+
+  this->pending_transport_packets_.push_back({destination_id, kPktTypeAck, std::move(payload)});
+}
+
+void InliteHub::handle_reverse_stream_flush_(const MeshPacket &packet) {
+  uint16_t offset = static_cast<uint16_t>(packet.payload[0] | (packet.payload[1] << 8));
+
+  if (offset == 0) {
+    if (this->debug_transport_) {
+      ESP_LOGD(TAG, "Reverse-stream START_FLUSH from 0x%04x", packet.source_id);
+    }
+    this->reverse_stream_ = {};
+    this->completed_reverse_stream_ = {};
+    this->reverse_stream_.active = true;
+    this->reverse_stream_.source_id = packet.source_id;
+    this->reverse_stream_.destination_id = packet.destination_id;
+    this->reverse_stream_.last_activity_ms = millis();
+    this->queue_reverse_stream_ack_(packet.source_id, 0, false);
+    return;
+  }
+
+  if (!this->reverse_stream_.active || this->reverse_stream_.source_id != packet.source_id) {
+    if (this->completed_reverse_stream_.valid && this->completed_reverse_stream_.source_id == packet.source_id &&
+        this->completed_reverse_stream_.final_offset == offset) {
+      if (this->debug_transport_) {
+        ESP_LOGD(TAG, "Re-sending reverse-stream END_ACK for duplicate END_FLUSH from 0x%04x",
+                 packet.source_id);
+      }
+      this->queue_reverse_stream_ack_(packet.source_id, offset, true);
+      return;
+    }
+    if (this->debug_transport_) {
+      ESP_LOGD(TAG, "Ignoring reverse-stream END_FLUSH from 0x%04x without an active session", packet.source_id);
+    }
+    return;
+  }
+
+  this->reverse_stream_.last_activity_ms = millis();
+  if (offset != this->reverse_stream_.acked_bytes) {
+    if (this->debug_transport_) {
+      ESP_LOGD(TAG,
+               "Reverse-stream END_FLUSH mismatch from 0x%04x: got=0x%04x current=0x%04x",
+               packet.source_id, offset, this->reverse_stream_.acked_bytes);
+    }
+    this->queue_reverse_stream_ack_(packet.source_id, this->reverse_stream_.acked_bytes, false);
+    return;
+  }
+
+  if (this->debug_transport_) {
+    ESP_LOGD(TAG, "Reverse-stream END_FLUSH complete from 0x%04x len=%u", packet.source_id,
+             this->reverse_stream_.acked_bytes);
+  }
+
+  this->reverse_stream_.completed = true;
+  this->queue_reverse_stream_ack_(packet.source_id, this->reverse_stream_.acked_bytes, true);
+  this->parse_get_info_devices_payload_(this->reverse_stream_.payload);
+  this->completed_reverse_stream_.valid = true;
+  this->completed_reverse_stream_.source_id = packet.source_id;
+  this->completed_reverse_stream_.final_offset = this->reverse_stream_.acked_bytes;
+  this->reverse_stream_ = {};
+}
+
+void InliteHub::handle_reverse_stream_data_(const MeshPacket &packet) {
+  uint16_t offset = static_cast<uint16_t>(packet.payload[0] | (packet.payload[1] << 8));
+  const size_t chunk_len = packet.payload.size() - 2;
+
+  if (!this->reverse_stream_.active || this->reverse_stream_.completed ||
+      this->reverse_stream_.source_id != packet.source_id) {
+    if (this->debug_transport_) {
+      ESP_LOGD(TAG, "Ignoring reverse-stream DATA from 0x%04x without an active session", packet.source_id);
+    }
+    return;
+  }
+
+  this->reverse_stream_.last_activity_ms = millis();
+  if (offset != this->reverse_stream_.acked_bytes) {
+    if (this->debug_transport_) {
+      ESP_LOGD(TAG,
+               "Reverse-stream DATA out of order from 0x%04x: got=0x%04x expected=0x%04x",
+               packet.source_id, offset, this->reverse_stream_.acked_bytes);
+    }
+    this->queue_reverse_stream_ack_(packet.source_id, this->reverse_stream_.acked_bytes, false);
+    return;
+  }
+
+  if (chunk_len > (static_cast<size_t>(UINT16_MAX) - this->reverse_stream_.acked_bytes)) {
+    ESP_LOGW(TAG, "Reverse-stream payload overflow from 0x%04x; dropping session", packet.source_id);
+    this->reverse_stream_ = {};
+    if (!this->has_bootstrap_snapshot_) {
+      this->queue_state_sync_request_(true);
+    }
+    return;
+  }
+
+  this->reverse_stream_.payload.insert(this->reverse_stream_.payload.end(), packet.payload.begin() + 2,
+                                       packet.payload.end());
+  this->reverse_stream_.acked_bytes =
+      static_cast<uint16_t>(this->reverse_stream_.acked_bytes + chunk_len);
+
+  if (this->debug_transport_) {
+    ESP_LOGD(TAG, "Reverse-stream DATA from 0x%04x offset=0x%04x len=%u acked=0x%04x", packet.source_id,
+             offset, static_cast<unsigned int>(chunk_len), this->reverse_stream_.acked_bytes);
+  }
+
+  this->queue_reverse_stream_ack_(packet.source_id, this->reverse_stream_.acked_bytes, false);
+}
+
+void InliteHub::expire_reverse_stream_() {
+  if (!this->reverse_stream_.active) {
+    return;
+  }
+
+  if (millis() - this->reverse_stream_.last_activity_ms <= kRxStreamInactivityTimeoutMs) {
+    return;
+  }
+
+  ESP_LOGW(TAG, "Reverse-stream session from 0x%04x expired after %ums", this->reverse_stream_.source_id,
+           kRxStreamInactivityTimeoutMs);
+  this->reverse_stream_ = {};
+  if (!this->has_bootstrap_snapshot_) {
+    this->queue_state_sync_request_(true);
+  }
+}
+
 void InliteHub::process_active_stream_() {
   if (!this->active_stream_.active) {
     if (this->queue_.empty()) {
@@ -413,11 +662,18 @@ void InliteHub::process_active_stream_() {
     if (queued.is_line_command) {
       this->refresh_line_pending_started_ms_(queued.line_id, queued.pending_token);
     }
+    if (this->debug_transport_) {
+      ESP_LOGD(TAG, "Starting TX stream len=%u line_command=%s line=%u", static_cast<unsigned int>(queued.payload.size()),
+               queued.is_line_command ? "true" : "false", queued.line_id);
+    }
   }
 
   switch (this->active_stream_.stage) {
     case StreamStage::SEND_START: {
       std::vector<uint8_t> start_data = {0x00, 0x00};
+      if (this->debug_transport_) {
+        ESP_LOGD(TAG, "TX stream START_FLUSH");
+      }
       if (!this->send_stream_packet_(kPktTypeStartFlush, start_data)) {
         this->finish_active_stream_(-30);
         return;
@@ -444,6 +700,10 @@ void InliteHub::process_active_stream_() {
       data.insert(data.end(), this->active_stream_.payload.begin() + this->active_stream_.offset,
                   this->active_stream_.payload.begin() + this->active_stream_.offset + chunk_len);
 
+      if (this->debug_transport_) {
+        ESP_LOGD(TAG, "TX stream DATA offset=0x%04x len=%u", static_cast<unsigned int>(this->active_stream_.offset),
+                 static_cast<unsigned int>(chunk_len));
+      }
       if (!this->send_stream_packet_(kPktTypeData, data)) {
         this->finish_active_stream_(-31);
         return;
@@ -463,6 +723,9 @@ void InliteHub::process_active_stream_() {
           static_cast<uint8_t>((final_offset >> 8) & 0xFF),
       };
 
+      if (this->debug_transport_) {
+        ESP_LOGD(TAG, "TX stream END_FLUSH offset=0x%04x", final_offset);
+      }
       if (!this->send_stream_packet_(kPktTypeStartFlush, end_data)) {
         this->finish_active_stream_(-32);
         return;
@@ -489,11 +752,18 @@ void InliteHub::process_active_stream_() {
 
 bool InliteHub::retry_or_fail_() {
   if (this->active_stream_.attempts >= this->retries_) {
+    if (this->debug_transport_) {
+      ESP_LOGD(TAG, "TX stream retries exhausted in stage=%d", static_cast<int>(this->active_stream_.stage));
+    }
     this->finish_active_stream_(-40);
     return false;
   }
 
   this->active_stream_.attempts++;
+  if (this->debug_transport_) {
+    ESP_LOGD(TAG, "Retrying TX stream stage=%d attempt=%u", static_cast<int>(this->active_stream_.stage),
+             this->active_stream_.attempts);
+  }
 
   switch (this->active_stream_.stage) {
     case StreamStage::WAIT_START_ACK:
@@ -551,6 +821,9 @@ bool InliteHub::send_encrypted_packet_(const std::vector<uint8_t> &encrypted_pac
 
 void InliteHub::handle_mesh_packet_(const MeshPacket &packet) {
   if (packet.source_id != this->hub_id_) {
+    if (this->debug_transport_) {
+      ESP_LOGD(TAG, "Ignoring mesh packet from unexpected source 0x%04x", packet.source_id);
+    }
     return;
   }
 
@@ -564,8 +837,24 @@ void InliteHub::handle_mesh_packet_(const MeshPacket &packet) {
     return;
   }
 
+  if (packet.packet_type == kPktTypeStartFlush && packet.payload.size() >= 2) {
+    this->handle_reverse_stream_flush_(packet);
+    return;
+  }
+
+  if ((packet.packet_type == kPktTypeData || packet.packet_type == kPktTypeStreamDataAlt) &&
+      packet.payload.size() >= 2) {
+    this->handle_reverse_stream_data_(packet);
+    return;
+  }
+
   if (packet.packet_type == kPktTypeBlockData) {
     this->handle_block_data_(packet.payload);
+    return;
+  }
+
+  if (this->debug_transport_) {
+    ESP_LOGD(TAG, "Ignoring mesh packet type=%u from 0x%04x", packet.packet_type, packet.source_id);
   }
 }
 
@@ -614,8 +903,72 @@ void InliteHub::handle_block_data_(const std::vector<uint8_t> &payload) {
   }
   if (line_chunks > 0) {
     this->has_received_state_snapshot_ = true;
-    this->has_bootstrap_snapshot_ = true;
   }
+}
+
+bool InliteHub::is_get_info_devices_payload_(const std::vector<uint8_t> &payload) const {
+  return payload.size() == 3 && payload[0] == kCmdTypeRequest &&
+         payload[1] == static_cast<uint8_t>(kOpcodeGetInfoDevices & 0xFF) &&
+         payload[2] == static_cast<uint8_t>((kOpcodeGetInfoDevices >> 8) & 0xFF);
+}
+
+bool InliteHub::parse_get_info_devices_payload_(const std::vector<uint8_t> &payload) {
+  if (payload.size() < 8) {
+    return false;
+  }
+
+  const uint16_t opcode = static_cast<uint16_t>(payload[1] | (payload[2] << 8));
+  if (opcode != kOpcodeGetInfoDevices) {
+    if (this->debug_transport_) {
+      ESP_LOGD(TAG, "Reverse-stream payload opcode=0x%04x is not GET_INFO_DEVICES", opcode);
+    }
+    return false;
+  }
+
+  if (payload[4] != kProductTypeSmartHub) {
+    ESP_LOGW(TAG, "Ignoring GET_INFO_DEVICES payload for unsupported product type=%u", payload[4]);
+    return false;
+  }
+
+  const uint8_t outlet_count = payload[7];
+  if (outlet_count == 0) {
+    if (this->debug_transport_) {
+      ESP_LOGD(TAG, "GET_INFO_DEVICES contained zero outlets");
+    }
+    return false;
+  }
+
+  const size_t compact_len = 8 + (static_cast<size_t>(outlet_count) * 7);
+  const size_t extended_len = 8 + (static_cast<size_t>(outlet_count) * 23);
+  size_t outlet_size = 0;
+  if (payload.size() >= extended_len) {
+    outlet_size = 23;
+  } else if (payload.size() >= compact_len) {
+    outlet_size = 7;
+  } else {
+    ESP_LOGW(TAG, "GET_INFO_DEVICES payload too short for %u outlets (%u bytes)", outlet_count,
+             static_cast<unsigned int>(payload.size()));
+    return false;
+  }
+
+  if (this->debug_transport_) {
+    ESP_LOGD(TAG, "Applying GET_INFO_DEVICES snapshot with %u outlets using %u-byte records",
+             outlet_count, static_cast<unsigned int>(outlet_size));
+  }
+
+  size_t pos = 8;
+  for (uint8_t i = 0; i < outlet_count; i++) {
+    if (pos + 7 > payload.size()) {
+      ESP_LOGW(TAG, "GET_INFO_DEVICES truncated while parsing outlet %u", i);
+      return false;
+    }
+    this->apply_line_mode_update_(payload[pos], payload[pos + 3], payload[pos + 6], 0);
+    pos += outlet_size;
+  }
+
+  this->has_received_state_snapshot_ = true;
+  this->has_bootstrap_snapshot_ = true;
+  return true;
 }
 
 void InliteHub::apply_line_mode_update_(uint8_t line_id, uint8_t output_mode, uint8_t output_state,
@@ -670,7 +1023,16 @@ void InliteHub::apply_line_mode_update_(uint8_t line_id, uint8_t output_mode, ui
 
 void InliteHub::handle_stream_ack_(uint16_t ack_offset, bool end_ack) {
   if (!this->active_stream_.active) {
+    if (this->debug_transport_) {
+      ESP_LOGD(TAG, "Ignoring TX ACK offset=0x%04x end=%s without an active stream", ack_offset,
+               end_ack ? "true" : "false");
+    }
     return;
+  }
+
+  if (this->debug_transport_) {
+    ESP_LOGD(TAG, "RX TX-stream ACK offset=0x%04x end=%s stage=%d", ack_offset, end_ack ? "true" : "false",
+             static_cast<int>(this->active_stream_.stage));
   }
 
   switch (this->active_stream_.stage) {
@@ -719,6 +1081,10 @@ void InliteHub::handle_stream_ack_(uint16_t ack_offset, bool end_ack) {
 void InliteHub::finish_active_stream_(int status_code) {
   StreamState completed = this->active_stream_;
 
+  if (this->debug_transport_) {
+    ESP_LOGD(TAG, "Finishing TX stream status=%d line_command=%s line=%u", status_code,
+             completed.is_line_command ? "true" : "false", completed.line_id);
+  }
   this->publish_last_command_status_(status_code);
   this->active_stream_ = {};
 
@@ -741,6 +1107,11 @@ std::vector<uint8_t> InliteHub::build_encrypted_packet_(uint16_t destination_id,
                                                         const std::vector<uint8_t> &data,
                                                         uint8_t ttl) {
   this->sequence_number_ = (this->sequence_number_ + 1) & 0x00FFFFFF;
+
+  if (this->debug_transport_) {
+    ESP_LOGD(TAG, "Building mesh packet seq=0x%06" PRIx32 " dst=0x%04x type=%u len=%u",
+             this->sequence_number_, destination_id, packet_type, static_cast<unsigned int>(data.size()));
+  }
 
   std::vector<uint8_t> plain_payload;
   plain_payload.reserve(3 + data.size());
@@ -1153,6 +1524,18 @@ void InliteLineLight::apply_remote_mode(uint8_t output_mode, uint8_t output_stat
   this->state_->remote_values = values;
   this->state_->current_values = values;
   this->state_->publish_state();
+}
+
+void InliteRefreshStateButton::press_action() {
+  if (this->parent_ != nullptr) {
+    this->parent_->debug_request_state_refresh();
+  }
+}
+
+void InliteReconnectButton::press_action() {
+  if (this->parent_ != nullptr) {
+    this->parent_->debug_request_reconnect();
+  }
 }
 
 }  // namespace inlite_hub
