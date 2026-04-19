@@ -169,8 +169,9 @@ jobs:
           ASSET_NAME: ${{ needs.checks.outputs.artifact_name }}.zip
         run: |
           asset_path="dist/${ASSET_NAME}"
-          gh release view "${TAG_NAME}" >/dev/null 2>&1 || \
+          gh release view "${TAG_NAME}" --repo "${GITHUB_REPOSITORY}" >/dev/null 2>&1 || \
             gh release create "${TAG_NAME}" \
+              --repo "${GITHUB_REPOSITORY}" \
               --title "${TAG_NAME}" \
               --notes "Automated firmware build for ${TAG_NAME}"
-          gh release upload "${TAG_NAME}" "${asset_path}" --clobber
+          gh release upload "${TAG_NAME}" "${asset_path}" --repo "${GITHUB_REPOSITORY}" --clobber
