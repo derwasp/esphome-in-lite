@@ -155,6 +155,12 @@ class InliteHub : public ble_client::BLEClientNode,
     uint32_t last_activity_ms{0};
   };
 
+  struct CompletedReverseStreamState {
+    bool valid{false};
+    uint16_t source_id{0};
+    uint16_t final_offset{0};
+  };
+
   void reset_ble_state_(bool clear_pending);
   void clear_transport_runtime_(bool clear_command_queue, bool clear_pending_lines);
   bool configure_characteristics_();
@@ -240,11 +246,13 @@ class InliteHub : public ble_client::BLEClientNode,
   std::array<uint8_t, 16> network_key_{};
 
   std::vector<uint8_t> incoming_packet_buffer_;
+  uint32_t transport_session_token_{0};
   std::deque<MeshPacket> rx_packet_queue_;
   std::deque<QueuedTransportPacket> pending_transport_packets_;
   std::deque<QueuedMeshPayload> queue_;
   StreamState active_stream_;
   ReverseStreamState reverse_stream_;
+  CompletedReverseStreamState completed_reverse_stream_{};
   std::array<PendingLineState, 16> pending_line_states_{};
   uint32_t next_pending_token_{0};
   bool has_received_state_snapshot_{false};

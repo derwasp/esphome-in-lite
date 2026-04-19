@@ -340,7 +340,14 @@ void InliteHub::gattc_event_handler(esp_gattc_cb_event_t event, esp_gatt_if_t ga
                      static_cast<unsigned int>(packet.payload.size()));
           }
           if (this->parent() != nullptr) {
-            this->parent()->run_later([this, packet = std::move(packet)]() mutable {
+            const uint32_t session_token = this->transport_session_token_;
+            this->parent()->run_later([this, packet = std::move(packet), session_token]() mutable {
+              if (this->transport_session_token_ != session_token) {
+                if (this->debug_transport_) {
+                  ESP_LOGD(TAG, "Dropping deferred RX packet from a stale transport session");
+                }
+                return;
+              }
               this->rx_packet_queue_.push_back(std::move(packet));
             });
           }
@@ -390,11 +397,13 @@ void InliteHub::reset_ble_state_(bool clear_pending) {
 }
 
 void InliteHub::clear_transport_runtime_(bool clear_command_queue, bool clear_pending_lines) {
+  this->transport_session_token_++;
   this->incoming_packet_buffer_.clear();
   this->rx_packet_queue_.clear();
   this->pending_transport_packets_.clear();
   this->active_stream_ = {};
   this->reverse_stream_ = {};
+  this->completed_reverse_stream_ = {};
 
   if (clear_command_queue) {
     this->queue_.clear();
@@ -519,6 +528,7 @@ void InliteHub::handle_reverse_stream_flush_(const MeshPacket &packet) {
       ESP_LOGD(TAG, "Reverse-stream START_FLUSH from 0x%04x", packet.source_id);
     }
     this->reverse_stream_ = {};
+    this->completed_reverse_stream_ = {};
     this->reverse_stream_.active = true;
     this->reverse_stream_.source_id = packet.source_id;
     this->reverse_stream_.destination_id = packet.destination_id;
@@ -528,6 +538,15 @@ void InliteHub::handle_reverse_stream_flush_(const MeshPacket &packet) {
   }
 
   if (!this->reverse_stream_.active || this->reverse_stream_.source_id != packet.source_id) {
+    if (this->completed_reverse_stream_.valid && this->completed_reverse_stream_.source_id == packet.source_id &&
+        this->completed_reverse_stream_.final_offset == offset) {
+      if (this->debug_transport_) {
+        ESP_LOGD(TAG, "Re-sending reverse-stream END_ACK for duplicate END_FLUSH from 0x%04x",
+                 packet.source_id);
+      }
+      this->queue_reverse_stream_ack_(packet.source_id, offset, true);
+      return;
+    }
     if (this->debug_transport_) {
       ESP_LOGD(TAG, "Ignoring reverse-stream END_FLUSH from 0x%04x without an active session", packet.source_id);
     }
@@ -553,6 +572,9 @@ void InliteHub::handle_reverse_stream_flush_(const MeshPacket &packet) {
   this->reverse_stream_.completed = true;
   this->queue_reverse_stream_ack_(packet.source_id, this->reverse_stream_.acked_bytes, true);
   this->parse_get_info_devices_payload_(this->reverse_stream_.payload);
+  this->completed_reverse_stream_.valid = true;
+  this->completed_reverse_stream_.source_id = packet.source_id;
+  this->completed_reverse_stream_.final_offset = this->reverse_stream_.acked_bytes;
   this->reverse_stream_ = {};
 }
 
