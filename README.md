@@ -2,8 +2,6 @@
 
 ESPHome external component for local BLE control of in-lite Smart Hub-150.
 
-> Work in progress (WIP): this integration is not tested yet.
-
 **Getting started:** make sure you already have an in-lite account configured in the mobile app (and your garden is visible there), then run `python3 tools/inlite_config_wizard.py` to log in, select a garden, and generate a ready-to-use ESPHome YAML with `hub_id` and `network_passphrase_hex`.
 
 ## What This Component Does
