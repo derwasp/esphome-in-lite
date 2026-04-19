@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import os
 import re
 import subprocess
 import sys
@@ -11,6 +12,7 @@ import tempfile
 from pathlib import Path
 
 DEFAULT_BASE_VERSION = "0.9.0"
+SEMVER_TAG_RE = re.compile(r"^v?(?P<major>\d+)\.(?P<minor>\d+)\.(?P<patch>\d+)$")
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
@@ -36,12 +38,21 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     )
     parser.add_argument(
         "--base-version",
-        default=DEFAULT_BASE_VERSION,
-        help=f"Base project version to prefix before the branch name (default: {DEFAULT_BASE_VERSION})",
+        help=(
+            "Override the derived project version base. When omitted, exact tags "
+            "use the tag version, otherwise the latest tag contributes the major "
+            "and minor numbers while the patch number becomes the number of commits "
+            f"since that tag. Falls back to {DEFAULT_BASE_VERSION} if the repo has no tags."
+        ),
     )
     parser.add_argument(
         "--branch",
         help="Override the git branch name used in the stamped project version",
+    )
+    parser.add_argument(
+        "--print-version",
+        action="store_true",
+        help="Print the derived project version and exit without running ESPHome",
     )
     parser.add_argument(
         "--esphome-bin",
@@ -61,28 +72,109 @@ def run_capture(cmd: list[str], *, cwd: Path) -> str:
     result = subprocess.run(
         cmd,
         cwd=cwd,
-        check=True,
         text=True,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
     )
+    if result.returncode != 0:
+        message = result.stderr.strip() or result.stdout.strip() or "command failed"
+        raise RuntimeError(f"{' '.join(cmd)}: {message}")
     return result.stdout.strip()
 
 
-def repo_root(script_path: Path) -> Path:
-    return Path(
-        run_capture(
-            ["git", "rev-parse", "--show-toplevel"],
-            cwd=script_path.parent,
-        )
+def try_capture(cmd: list[str], *, cwd: Path) -> str | None:
+    result = subprocess.run(
+        cmd,
+        cwd=cwd,
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
     )
+    if result.returncode != 0:
+        return None
+    text = result.stdout.strip()
+    return text or None
+
+
+def repo_root(script_path: Path) -> Path:
+    try:
+        return Path(
+            run_capture(
+                ["git", "rev-parse", "--show-toplevel"],
+                cwd=script_path.parent,
+            )
+        )
+    except RuntimeError as err:
+        raise SystemExit(str(err)) from err
 
 
 def current_branch(root: Path) -> str:
-    branch = run_capture(["git", "branch", "--show-current"], cwd=root)
+    github_head_ref = os.environ.get("GITHUB_HEAD_REF")
+    if github_head_ref:
+        return github_head_ref
+
+    github_ref_type = os.environ.get("GITHUB_REF_TYPE")
+    github_ref_name = os.environ.get("GITHUB_REF_NAME")
+    if github_ref_type == "branch" and github_ref_name:
+        return github_ref_name
+
+    try:
+        branch = run_capture(["git", "branch", "--show-current"], cwd=root)
+    except RuntimeError as err:
+        raise SystemExit(str(err)) from err
     if not branch:
         raise SystemExit("Could not determine the current git branch")
     return branch
+
+
+def parse_semver_tag(tag: str) -> tuple[int, int, int]:
+    match = SEMVER_TAG_RE.fullmatch(tag.strip())
+    if not match:
+        raise SystemExit(
+            f"Tag {tag!r} is not a supported semantic version. Expected forms like 0.9.0 or v0.9.0."
+        )
+    return (
+        int(match.group("major")),
+        int(match.group("minor")),
+        int(match.group("patch")),
+    )
+
+
+def normalize_semver_tag(tag: str) -> str:
+    major, minor, patch = parse_semver_tag(tag)
+    return f"{major}.{minor}.{patch}"
+
+
+def exact_head_tag(root: Path) -> str | None:
+    return try_capture(["git", "describe", "--tags", "--exact-match"], cwd=root)
+
+
+def latest_reachable_tag(root: Path) -> str | None:
+    return try_capture(["git", "describe", "--tags", "--abbrev=0"], cwd=root)
+
+
+def commits_since_tag(root: Path, tag: str) -> int:
+    try:
+        return int(run_capture(["git", "rev-list", "--count", f"{tag}..HEAD"], cwd=root))
+    except RuntimeError as err:
+        raise SystemExit(str(err)) from err
+
+
+def derive_base_version(root: Path, explicit_base_version: str | None) -> tuple[str, str]:
+    if explicit_base_version:
+        return explicit_base_version, "CLI override"
+
+    exact_tag = exact_head_tag(root)
+    if exact_tag is not None:
+        return normalize_semver_tag(exact_tag), f"exact tag {exact_tag}"
+
+    latest_tag = latest_reachable_tag(root)
+    if latest_tag is not None:
+        major, minor, _ = parse_semver_tag(latest_tag)
+        commit_count = commits_since_tag(root, latest_tag)
+        return f"{major}.{minor}.{commit_count}", f"{commit_count} commits since {latest_tag}"
+
+    return DEFAULT_BASE_VERSION, f"fallback default {DEFAULT_BASE_VERSION}"
 
 
 def sanitize_branch_name(branch: str) -> str:
@@ -151,8 +243,13 @@ def main() -> int:
 
     branch_name = args.branch or current_branch(root)
     branch_tag = sanitize_branch_name(branch_name)
-    stamped_version = f"{args.base_version}-{branch_tag}"
+    base_version, version_source = derive_base_version(root, args.base_version)
+    stamped_version = f"{base_version}-{branch_tag}"
     esphome_bin = args.esphome_bin or default_esphome_bin(root)
+
+    if args.print_version:
+        print(stamped_version)
+        return 0
 
     temp_path: Path | None = None
     try:
@@ -172,6 +269,7 @@ def main() -> int:
             temp_path = Path(handle.name)
 
         print(f"Branch:          {branch_name}")
+        print(f"Version source:  {version_source}")
         print(f"Stamped version: {stamped_version}")
         print(f"ESPHome binary:  {esphome_bin}")
         print(f"Temp config:     {temp_path}")

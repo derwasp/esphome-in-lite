@@ -1,5 +1,8 @@
 esphome:
   name: ci-inlite-smoke
+  project:
+    name: local.ci_inlite_smoke
+    version: "0.9.0"
 
 esp32:
   board: esp32dev
