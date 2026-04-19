@@ -75,6 +75,7 @@ inlite_hub:
     retries: 2
     poll_interval: 15s
     state_refresh_interval: 5min
+    debug_transport: false
 
 light:
   - platform: inlite_hub
@@ -108,6 +109,14 @@ binary_sensor:
       entity_category: diagnostic
 
 button:
+  - platform: inlite_hub
+    inlite_hub_id: inlite_hub_main
+    refresh_state:
+      name: ${entity_prefix} Refresh State
+      entity_category: diagnostic
+    reconnect:
+      name: ${entity_prefix} Reconnect
+      entity_category: diagnostic
   - platform: restart
     name: ${entity_prefix} Restart
     entity_category: diagnostic

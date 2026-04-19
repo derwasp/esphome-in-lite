@@ -31,3 +31,14 @@ inlite_hub:
     esp32_ble_id: inlite_ble_tracker_id
     hub_id: 0x1234
     network_passphrase_hex: "74657374"
+    debug_transport: true
+
+button:
+  - platform: inlite_hub
+    inlite_hub_id: inlite_hub_main
+    refresh_state:
+      name: "In-lite Smoke Refresh State"
+      entity_category: diagnostic
+    reconnect:
+      name: "In-lite Smoke Reconnect"
+      entity_category: diagnostic

@@ -10,6 +10,7 @@
 
 #include "esphome/components/ble_client/ble_client.h"
 #include "esphome/components/binary_sensor/binary_sensor.h"
+#include "esphome/components/button/button.h"
 #include "esphome/components/light/light_output.h"
 #include "esphome/components/sensor/sensor.h"
 #include "esphome/core/component.h"
@@ -20,6 +21,8 @@ namespace inlite_hub {
 namespace espbt = esphome::esp32_ble_tracker;
 
 class InliteLineLight;
+class InliteRefreshStateButton;
+class InliteReconnectButton;
 
 class InliteHub : public ble_client::BLEClientNode,
                   public PollingComponent,
@@ -51,6 +54,7 @@ class InliteHub : public ble_client::BLEClientNode,
     this->command_timeout_ms_ = command_timeout_ms;
   }
   void set_retries(uint8_t retries) { this->retries_ = retries; }
+  void set_debug_transport(bool debug_transport) { this->debug_transport_ = debug_transport; }
   void set_state_refresh_interval(uint32_t state_refresh_interval_ms) {
     this->state_refresh_interval_ms_ = state_refresh_interval_ms;
   }
@@ -65,6 +69,8 @@ class InliteHub : public ble_client::BLEClientNode,
 
   void register_line_light(InliteLineLight *line_light);
   void queue_line_command(uint8_t line_id, bool on);
+  void debug_request_state_refresh();
+  void debug_request_reconnect();
 
  protected:
   static constexpr uint8_t kCmdTypeRequest = 0x01;
@@ -74,13 +80,16 @@ class InliteHub : public ble_client::BLEClientNode,
   static constexpr uint8_t kPktTypeData = 113;
   static constexpr uint8_t kPktTypeAck = 114;
   static constexpr uint8_t kPktTypeBlockData = 115;
+  static constexpr uint8_t kPktTypeStreamDataAlt = 116;
   static constexpr uint8_t kCmdTypeOob = 0x03;
   static constexpr uint16_t kOpcodeOobOutletModeUpdate = 24;
   static constexpr uint16_t kOpcodeOobAllOutletsModeUpdate = 33;
+  static constexpr uint8_t kProductTypeSmartHub = 3;
   static constexpr uint8_t kTtlDefault = 5;
   static constexpr uint8_t kEndAckMagic = 0xEF;
   static constexpr size_t kMaxDataChunk = 62;
   static constexpr size_t kBleChunkSize = 78;
+  static constexpr uint32_t kRxStreamInactivityTimeoutMs = 15000;
 
   enum class StreamStage {
     IDLE,
@@ -130,11 +139,35 @@ class InliteHub : public ble_client::BLEClientNode,
     std::vector<uint8_t> payload;
   };
 
+  struct QueuedTransportPacket {
+    uint16_t destination_id{0};
+    uint8_t packet_type{0};
+    std::vector<uint8_t> payload;
+  };
+
+  struct ReverseStreamState {
+    bool active{false};
+    uint16_t source_id{0};
+    uint16_t destination_id{0};
+    std::vector<uint8_t> payload;
+    uint16_t acked_bytes{0};
+    bool completed{false};
+    uint32_t last_activity_ms{0};
+  };
+
   void reset_ble_state_(bool clear_pending);
+  void clear_transport_runtime_(bool clear_command_queue, bool clear_pending_lines);
   bool configure_characteristics_();
+  void process_rx_packet_queue_();
+  void process_transport_packets_();
+  bool process_pending_transport_packets_();
   void process_active_stream_();
   bool retry_or_fail_();
   void queue_state_sync_request_(bool force);
+  void handle_reverse_stream_flush_(const MeshPacket &packet);
+  void handle_reverse_stream_data_(const MeshPacket &packet);
+  void queue_reverse_stream_ack_(uint16_t destination_id, uint16_t ack_offset, bool end_ack);
+  void expire_reverse_stream_();
   void expire_stale_pending_lines_();
   uint32_t pending_line_timeout_ms_() const;
   uint32_t mark_line_pending_(uint8_t line_id, bool desired_on);
@@ -148,6 +181,8 @@ class InliteHub : public ble_client::BLEClientNode,
   void handle_mesh_packet_(const MeshPacket &packet);
   void handle_block_data_(const std::vector<uint8_t> &payload);
   void handle_stream_ack_(uint16_t ack_offset, bool end_ack);
+  bool parse_get_info_devices_payload_(const std::vector<uint8_t> &payload);
+  bool is_get_info_devices_payload_(const std::vector<uint8_t> &payload) const;
   void apply_line_mode_update_(uint8_t line_id, uint8_t output_mode, uint8_t output_state,
                                uint8_t output_rtc_timer);
   void finish_active_stream_(int status_code);
@@ -185,6 +220,7 @@ class InliteHub : public ble_client::BLEClientNode,
   uint64_t discover_match_address_{0};
   uint64_t selected_discovery_address_{0};
   int selected_discovery_score_{-10000};
+  bool debug_transport_{false};
 
   uint32_t command_timeout_ms_{600};
   uint8_t retries_{2};
@@ -204,13 +240,17 @@ class InliteHub : public ble_client::BLEClientNode,
   std::array<uint8_t, 16> network_key_{};
 
   std::vector<uint8_t> incoming_packet_buffer_;
+  std::deque<MeshPacket> rx_packet_queue_;
+  std::deque<QueuedTransportPacket> pending_transport_packets_;
   std::deque<QueuedMeshPayload> queue_;
   StreamState active_stream_;
+  ReverseStreamState reverse_stream_;
   std::array<PendingLineState, 16> pending_line_states_{};
   uint32_t next_pending_token_{0};
   bool has_received_state_snapshot_{false};
   bool has_bootstrap_snapshot_{false};
   uint32_t last_state_sync_request_ms_{0};
+  bool force_refresh_on_next_connect_{false};
 
   std::vector<InliteLineLight *> line_lights_;
 
@@ -237,6 +277,26 @@ class InliteLineLight : public light::LightOutput, public Component {
   uint8_t last_output_mode_{0};
   uint8_t last_output_state_{0};
   uint8_t last_output_rtc_timer_{0};
+};
+
+class InliteRefreshStateButton : public button::Button {
+ public:
+  void set_parent(InliteHub *parent) { this->parent_ = parent; }
+
+ protected:
+  void press_action() override;
+
+  InliteHub *parent_{nullptr};
+};
+
+class InliteReconnectButton : public button::Button {
+ public:
+  void set_parent(InliteHub *parent) { this->parent_ = parent; }
+
+ protected:
+  void press_action() override;
+
+  InliteHub *parent_{nullptr};
 };
 
 }  // namespace inlite_hub
