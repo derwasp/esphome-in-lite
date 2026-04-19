@@ -737,11 +737,13 @@ class InliteBleConsole:
         if packet_type in {PKT_TYPE_DATA, PKT_TYPE_STREAM_DATA_ALT}:
             offset_text = "?"
             data_len = max(0, len(payload) - 2)
+            offset = None
             if len(payload) >= 2:
-                offset_text = str(payload[0] | (payload[1] << 8))
+                offset = payload[0] | (payload[1] << 8)
+                offset_text = str(offset)
             payload_note = ""
-            if len(payload) >= 3:
-                opcode = payload[1] | (payload[2] << 8)
+            if offset == 0 and len(payload) >= 5:
+                opcode = payload[3] | (payload[4] << 8)
                 if opcode == 5:
                     payload_note = "; contains GET_INFO_DEVICES response data"
             return (
