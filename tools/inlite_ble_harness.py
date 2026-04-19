@@ -350,15 +350,34 @@ class InliteBleHarness:
         self._rx_packet_queue: asyncio.Queue[DecryptedPacket] = asyncio.Queue()
         self._rx_worker_task: Optional[asyncio.Task[None]] = None
         self._rx_streams: dict[int, RxStreamState] = {}
+        self._rx_completed_flush_offsets: dict[int, int] = {}
         self._write_lock = asyncio.Lock()
 
     async def __aenter__(self) -> "InliteBleHarness":
         self._loop = asyncio.get_running_loop()
-        await self.client.connect()
-        self._rx_worker_task = asyncio.create_task(self._rx_worker())
-        await self.client.start_notify(UUID_CONTINUATION_CP, self._on_continuation)
-        await self.client.start_notify(UUID_COMPLETE_CP, self._on_complete)
-        return self
+        notify_started: list[str] = []
+        try:
+            await self.client.connect()
+            await self.client.start_notify(UUID_CONTINUATION_CP, self._on_continuation)
+            notify_started.append(UUID_CONTINUATION_CP)
+            await self.client.start_notify(UUID_COMPLETE_CP, self._on_complete)
+            notify_started.append(UUID_COMPLETE_CP)
+            self._rx_worker_task = asyncio.create_task(self._rx_worker())
+            return self
+        except Exception:
+            for char_uuid in reversed(notify_started):
+                try:
+                    await self.client.stop_notify(char_uuid)
+                except Exception:
+                    pass
+            self._loop = None
+            self._rx_streams.clear()
+            self._rx_completed_flush_offsets.clear()
+            try:
+                await self.client.disconnect()
+            except Exception:
+                pass
+            raise
 
     async def __aexit__(self, exc_type, exc, tb) -> None:
         try:
@@ -375,6 +394,7 @@ class InliteBleHarness:
             self._rx_worker_task = None
         self._loop = None
         self._rx_streams.clear()
+        self._rx_completed_flush_offsets.clear()
         await self.client.disconnect()
 
     def _log(self, msg: str) -> None:
@@ -488,6 +508,7 @@ class InliteBleHarness:
         stream = self._rx_streams.get(decrypted.source_id)
 
         if offset == 0:
+            self._rx_completed_flush_offsets.pop(decrypted.source_id, None)
             self._rx_streams[decrypted.source_id] = RxStreamState(
                 source_id=decrypted.source_id,
                 destination_id=decrypted.destination_id,
@@ -500,6 +521,16 @@ class InliteBleHarness:
             return
 
         if stream is None:
+            completed_offset = self._rx_completed_flush_offsets.get(decrypted.source_id)
+            if completed_offset == offset:
+                self._log(
+                    f"[ack] duplicate reverse-stream END_FLUSH from 0x{decrypted.source_id:04x}; "
+                    f"re-sending END_ACK offset=0x{offset:04x}"
+                )
+                await self._send_stream_ack_packet(
+                    decrypted.source_id, offset, end_ack=True
+                )
+                return
             self._log(
                 f"[ack] no active reverse stream for 0x{decrypted.source_id:04x}; "
                 f"ignoring END_FLUSH offset=0x{offset:04x}"
@@ -523,6 +554,7 @@ class InliteBleHarness:
                 self._publish_line_mode_updates(
                     bootstrap_updates, source="get_info_devices"
                 )
+            self._rx_completed_flush_offsets[decrypted.source_id] = stream.acked_bytes
             self._rx_streams.pop(decrypted.source_id, None)
             return
 
