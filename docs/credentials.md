@@ -1,4 +1,4 @@
-# Getting Credentials (No Android Required)
+# Getting Credentials (No Mobile App Required)
 
 This component needs two values:
 - `hub_id`
@@ -100,7 +100,7 @@ python3 tools/inlite_ble_harness.py scan --seconds 12 --name-filter inlite
 Example `secrets.yaml` entries:
 
 ```yaml
-inlite_smart_hub_mesh_id: 0x163E
+inlite_smart_hub_mesh_id: 0x1234
 inlite_smart_hub_passphrase_hex: c38e78...
 ```
 

@@ -38,7 +38,7 @@ esphome compile your_node.yaml
 
 ## Required Inputs
 
-- `hub_id` (mesh destination ID, for example `0x163E`)
+- `hub_id` (mesh destination ID, for example `0x1234`)
 - `network_passphrase_hex` (garden passphrase bytes as hex)
 
 When autodiscovery is enabled, you do not need to provide the hub BLE address.
@@ -83,7 +83,7 @@ python3 tools/inlite_ble_harness.py scan --seconds 12 --name-filter inlite
 
 ```bash
 python3 tools/inlite_ble_harness.py \
-  --hub-id 0x163E \
+  --hub-id 0x1234 \
   --passphrase-hex YOUR_HEX \
   line 0 on --auto-discover --discover-seconds 12
 ```
@@ -93,7 +93,7 @@ python3 tools/inlite_ble_harness.py \
 
 ```bash
 python3 tools/inlite_ble_harness.py \
-  --hub-id 0x163E \
+  --hub-id 0x1234 \
   --passphrase-hex YOUR_HEX \
   query --auto-discover --trigger-get-info --listen-seconds 8 --json
 ```

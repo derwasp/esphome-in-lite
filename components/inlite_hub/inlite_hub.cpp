@@ -706,7 +706,7 @@ void InliteHub::handle_stream_ack_(uint16_t ack_offset, bool end_ack) {
         return;
       }
       if (!end_ack) {
-        // Regular ACK for final offset is also considered success by the Android app.
+        // A regular ACK for the final offset is also treated as a successful finish.
       }
       this->finish_active_stream_(0);
       return;

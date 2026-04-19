@@ -20,7 +20,7 @@ import os
 import random
 import re
 import sys
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Optional, Union
 
 try:
@@ -52,6 +52,8 @@ PKT_TYPE_START_FLUSH = 112
 PKT_TYPE_DATA = 113
 PKT_TYPE_ACK = 114
 PKT_TYPE_BLOCK_DATA = 115
+# Protocol analysis shows packet type 116 behaves like RX stream-data.
+PKT_TYPE_STREAM_DATA_ALT = 116
 END_ACK_MAGIC = 0xEF
 MAX_STREAM_CHUNK = 62
 BLE_CHUNK = 78
@@ -63,6 +65,7 @@ OPCODE_SET_OUTLET_MODE = 4103
 OPCODE_GET_INFO_DEVICES = 5
 OPCODE_OOB_OUTLET_MODE_UPDATE = 24
 OPCODE_OOB_ALL_OUTLETS_MODE_UPDATE = 33
+PRODUCT_TYPE_SMART_HUB = 3
 
 
 @dataclass
@@ -85,6 +88,15 @@ class LineModeState:
     @property
     def on(self) -> bool:
         return (self.output_mode & 0x01) != 0
+
+
+@dataclass
+class RxStreamState:
+    source_id: int
+    destination_id: int
+    payload: bytearray = field(default_factory=bytearray)
+    acked_bytes: int = 0
+    completed: bool = False
 
 
 def parse_block_line_mode_updates(payload: bytes) -> list[LineModeState]:
@@ -127,6 +139,58 @@ def parse_block_line_mode_updates(payload: bytes) -> list[LineModeState]:
                 output_rtc_timer=body[i + 3],
             )
         )
+    return out
+
+
+def parse_get_info_devices_line_modes(payload: bytes) -> list[LineModeState]:
+    """Parse Smart Hub line states from a GET_INFO_DEVICES response.
+
+    Payload analysis shows that for Smart Hub product type 3, byte 7 is the
+    outlet count and the per-outlet records start at byte 8. Two layouts are
+    used:
+    - compact form: 7 bytes per outlet
+    - extended form: 23 bytes per outlet (name/icon included)
+    """
+    if len(payload) < 8:
+        return []
+
+    opcode = payload[1] | (payload[2] << 8)
+    if opcode != OPCODE_GET_INFO_DEVICES:
+        return []
+
+    if payload[4] != PRODUCT_TYPE_SMART_HUB:
+        return []
+
+    outlet_count = payload[7]
+    if outlet_count <= 0:
+        return []
+
+    compact_len = 8 + (outlet_count * 7)
+    extended_len = 8 + (outlet_count * 23)
+    if len(payload) >= extended_len:
+        outlet_size = 23
+    elif len(payload) >= compact_len:
+        outlet_size = 7
+    else:
+        return []
+
+    out: list[LineModeState] = []
+    pos = 8
+    for _ in range(outlet_count):
+        chunk = payload[pos : pos + outlet_size]
+        if len(chunk) < 7:
+            return []
+        out.append(
+            LineModeState(
+                line_id=chunk[0],
+                output_mode=chunk[3],
+                output_state=chunk[6],
+                output_rtc_timer=0,
+            )
+        )
+        pos += outlet_size
+
+    out.sort(key=lambda state: state.line_id)
     return out
 
 
@@ -282,9 +346,16 @@ class InliteBleHarness:
         self._ack_queue: asyncio.Queue[tuple[int, bool]] = asyncio.Queue()
         self._line_mode_queue: asyncio.Queue[list[LineModeState]] = asyncio.Queue()
         self._line_modes: dict[int, LineModeState] = {}
+        self._loop: Optional[asyncio.AbstractEventLoop] = None
+        self._rx_packet_queue: asyncio.Queue[DecryptedPacket] = asyncio.Queue()
+        self._rx_worker_task: Optional[asyncio.Task[None]] = None
+        self._rx_streams: dict[int, RxStreamState] = {}
+        self._write_lock = asyncio.Lock()
 
     async def __aenter__(self) -> "InliteBleHarness":
+        self._loop = asyncio.get_running_loop()
         await self.client.connect()
+        self._rx_worker_task = asyncio.create_task(self._rx_worker())
         await self.client.start_notify(UUID_CONTINUATION_CP, self._on_continuation)
         await self.client.start_notify(UUID_COMPLETE_CP, self._on_complete)
         return self
@@ -295,11 +366,35 @@ class InliteBleHarness:
             await self.client.stop_notify(UUID_COMPLETE_CP)
         except Exception:
             pass
+        if self._rx_worker_task is not None:
+            self._rx_worker_task.cancel()
+            try:
+                await self._rx_worker_task
+            except asyncio.CancelledError:
+                pass
+            self._rx_worker_task = None
+        self._loop = None
+        self._rx_streams.clear()
         await self.client.disconnect()
 
     def _log(self, msg: str) -> None:
         if self.verbose:
             print(msg)
+
+    def _publish_line_mode_updates(self, updates: list[LineModeState], *, source: str) -> None:
+        if not updates:
+            return
+        for update in updates:
+            self._line_modes[update.line_id] = update
+        self._line_mode_queue.put_nowait(updates)
+        self._log(
+            f"[state] source={source} "
+            + ", ".join(
+                f"line={u.line_id} on={str(u.on).lower()} mode=0x{u.output_mode:02x} "
+                f"state=0x{u.output_state:02x} rtc={u.output_rtc_timer}"
+                for u in updates
+            )
+        )
 
     def _on_continuation(self, _handle, data: bytearray) -> None:
         self._incoming.extend(data)
@@ -318,7 +413,23 @@ class InliteBleHarness:
             f"[rx] src=0x{decrypted.source_id:04x} dst=0x{decrypted.destination_id:04x} "
             f"type={decrypted.packet_type} payload={decrypted.payload.hex()}"
         )
+        if self._loop is None:
+            return
+        try:
+            self._loop.call_soon_threadsafe(self._rx_packet_queue.put_nowait, decrypted)
+        except RuntimeError:
+            # Event loop is already shutting down.
+            return
 
+    async def _rx_worker(self) -> None:
+        while True:
+            packet = await self._rx_packet_queue.get()
+            try:
+                await self._handle_incoming_packet(packet)
+            except Exception as exc:
+                self._log(f"[rx] incoming handler failed: {exc}")
+
+    async def _handle_incoming_packet(self, decrypted: DecryptedPacket) -> None:
         if (
             decrypted.packet_type == PKT_TYPE_ACK
             and decrypted.source_id == self.hub_id
@@ -330,34 +441,141 @@ class InliteBleHarness:
             return
 
         if (
+            decrypted.packet_type == PKT_TYPE_START_FLUSH
+            and decrypted.source_id == self.hub_id
+            and len(decrypted.payload) >= 2
+        ):
+            await self._handle_rx_stream_flush(decrypted)
+            return
+
+        if (
+            decrypted.packet_type in {PKT_TYPE_DATA, PKT_TYPE_STREAM_DATA_ALT}
+            and decrypted.source_id == self.hub_id
+            and len(decrypted.payload) >= 2
+        ):
+            await self._handle_rx_stream_data(decrypted)
+            return
+
+        if (
             decrypted.packet_type == PKT_TYPE_BLOCK_DATA
             and decrypted.source_id == self.hub_id
         ):
             updates = parse_block_line_mode_updates(decrypted.payload)
             if not updates:
                 return
-            for update in updates:
-                self._line_modes[update.line_id] = update
-            self._line_mode_queue.put_nowait(updates)
-            self._log(
-                "[state] "
-                + ", ".join(
-                    f"line={u.line_id} on={str(u.on).lower()} mode=0x{u.output_mode:02x} "
-                    f"state=0x{u.output_state:02x} rtc={u.output_rtc_timer}"
-                    for u in updates
-                )
+            self._publish_line_mode_updates(updates, source="oob")
+
+    async def _send_stream_ack_packet(
+        self,
+        destination_id: int,
+        offset: int,
+        *,
+        end_ack: bool,
+    ) -> None:
+        payload = bytes([offset & 0xFF, (offset >> 8) & 0xFF])
+        if end_ack:
+            payload += bytes([END_ACK_MAGIC])
+        packet = self.crypto.build_encrypted_packet(destination_id, PKT_TYPE_ACK, payload)
+        await self._send_encrypted_packet(packet)
+        ack_kind = "END_ACK" if end_ack else "ACK"
+        self._log(
+            f"[ack] sent reverse-stream {ack_kind} offset=0x{offset:04x} "
+            f"to 0x{destination_id:04x}"
+        )
+
+    async def _handle_rx_stream_flush(self, decrypted: DecryptedPacket) -> None:
+        offset = decrypted.payload[0] | (decrypted.payload[1] << 8)
+        stream = self._rx_streams.get(decrypted.source_id)
+
+        if offset == 0:
+            self._rx_streams[decrypted.source_id] = RxStreamState(
+                source_id=decrypted.source_id,
+                destination_id=decrypted.destination_id,
             )
+            self._log(
+                f"[rx] reverse-stream START_FLUSH from 0x{decrypted.source_id:04x}; "
+                "acknowledging offset=0"
+            )
+            await self._send_stream_ack_packet(decrypted.source_id, 0, end_ack=False)
+            return
+
+        if stream is None:
+            self._log(
+                f"[ack] no active reverse stream for 0x{decrypted.source_id:04x}; "
+                f"ignoring END_FLUSH offset=0x{offset:04x}"
+            )
+            return
+
+        if offset == stream.acked_bytes:
+            preview = bytes(stream.payload[:32]).hex()
+            if len(stream.payload) > 32:
+                preview += "..."
+            self._log(
+                f"[rx] reverse-stream complete from 0x{decrypted.source_id:04x} "
+                f"len={stream.acked_bytes} preview={preview}"
+            )
+            stream.completed = True
+            await self._send_stream_ack_packet(
+                decrypted.source_id, stream.acked_bytes, end_ack=True
+            )
+            bootstrap_updates = parse_get_info_devices_line_modes(bytes(stream.payload))
+            if bootstrap_updates:
+                self._publish_line_mode_updates(
+                    bootstrap_updates, source="get_info_devices"
+                )
+            self._rx_streams.pop(decrypted.source_id, None)
+            return
+
+        self._log(
+            f"[ack] reverse-stream END_FLUSH mismatch from 0x{decrypted.source_id:04x}; "
+            f"got=0x{offset:04x} current=0x{stream.acked_bytes:04x}, re-acking current"
+        )
+        await self._send_stream_ack_packet(
+            decrypted.source_id, stream.acked_bytes, end_ack=False
+        )
+
+    async def _handle_rx_stream_data(self, decrypted: DecryptedPacket) -> None:
+        offset = decrypted.payload[0] | (decrypted.payload[1] << 8)
+        chunk = decrypted.payload[2:]
+        stream = self._rx_streams.get(decrypted.source_id)
+        if stream is None or stream.completed:
+            self._log(
+                f"[ack] no active reverse stream for 0x{decrypted.source_id:04x}; "
+                f"ignoring DATA offset=0x{offset:04x}"
+            )
+            return
+
+        if offset != stream.acked_bytes:
+            self._log(
+                f"[ack] reverse-stream DATA out of order from 0x{decrypted.source_id:04x}; "
+                f"expected=0x{stream.acked_bytes:04x} got=0x{offset:04x}, re-acking current"
+            )
+            await self._send_stream_ack_packet(
+                decrypted.source_id, stream.acked_bytes, end_ack=False
+            )
+            return
+
+        stream.payload.extend(chunk)
+        stream.acked_bytes += len(chunk)
+        self._log(
+            f"[rx] reverse-stream DATA from 0x{decrypted.source_id:04x} "
+            f"offset=0x{offset:04x} len={len(chunk)} acked=0x{stream.acked_bytes:04x}"
+        )
+        await self._send_stream_ack_packet(
+            decrypted.source_id, stream.acked_bytes, end_ack=False
+        )
 
     async def _send_encrypted_packet(self, packet: bytes) -> None:
-        for i in range(0, len(packet), BLE_CHUNK):
-            chunk = packet[i : i + BLE_CHUNK]
-            is_last = i + BLE_CHUNK >= len(packet)
-            char_uuid = UUID_COMPLETE_WR if is_last else UUID_CONTINUATION_WR
-            await self.client.write_gatt_char(
-                char_uuid,
-                chunk,
-                response=self.write_with_response,
-            )
+        async with self._write_lock:
+            for i in range(0, len(packet), BLE_CHUNK):
+                chunk = packet[i : i + BLE_CHUNK]
+                is_last = i + BLE_CHUNK >= len(packet)
+                char_uuid = UUID_COMPLETE_WR if is_last else UUID_CONTINUATION_WR
+                await self.client.write_gatt_char(
+                    char_uuid,
+                    chunk,
+                    response=self.write_with_response,
+                )
 
     async def _await_ack(self, expected_offset: int, end_phase: bool) -> bool:
         while True:
@@ -736,6 +954,23 @@ def run_selftest() -> int:
     parsed_single = parse_block_line_mode_updates(sample_oob_single)
     if len(parsed_single) != 1 or parsed_single[0].line_id != 2 or not parsed_single[0].on:
         print("selftest failed: OOB single-line parser mismatch", file=sys.stderr)
+        return 1
+
+    sample_get_info_devices = bytes.fromhex(
+        "0205000c03340003"
+        "00010100000000"
+        "01010101000001"
+        "02010100000000"
+    )
+    parsed_device_info = parse_get_info_devices_line_modes(sample_get_info_devices)
+    if len(parsed_device_info) != 3:
+        print("selftest failed: GET_INFO_DEVICES parser count mismatch", file=sys.stderr)
+        return 1
+    if parsed_device_info[0].line_id != 0 or parsed_device_info[0].on:
+        print("selftest failed: GET_INFO_DEVICES line 0 mismatch", file=sys.stderr)
+        return 1
+    if parsed_device_info[1].line_id != 1 or not parsed_device_info[1].on:
+        print("selftest failed: GET_INFO_DEVICES line 1 mismatch", file=sys.stderr)
         return 1
 
     print("selftest passed")

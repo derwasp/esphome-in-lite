@@ -29,5 +29,5 @@ inlite_hub:
   - id: inlite_hub_main
     ble_client_id: inlite_ble_id
     esp32_ble_id: inlite_ble_tracker_id
-    hub_id: 0x163E
+    hub_id: 0x1234
     network_passphrase_hex: "74657374"
